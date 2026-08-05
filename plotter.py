@@ -8,9 +8,9 @@ import geopandas as gpd
 from overpassapi import getPlaces
 from python_tsp.heuristics import solve_tsp_local_search
 
-PLACE_NAME = "Costco"
-PLACE_MAIN_TYPE = "shop"
-PLACE_TYPE = "wholesale"
+PLACE_NAME = "McDonald's"
+PLACE_MAIN_TYPE = "amenity"
+PLACE_TYPE = "fast_food"
 
 TX_EXTENT = [-106.7, -93.5, 25.5, 36.6]  # west, east, south, north
 
@@ -91,7 +91,7 @@ title_text = fig.text(0.5, 0.94, f"{PLACE_NAME} Road Trip", ha='center', fontsiz
 stat_text = fig.text(0.5, 0.06, "", ha='center', fontsize=14)
 
 DURATION_SEC = 20
-FPS = 10
+FPS = 20
 NUM_FRAMES = DURATION_SEC * FPS
 
 FIG_ASPECT = 9 / 16
