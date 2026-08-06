@@ -9,6 +9,7 @@ See scripts/osrm-setup.sh for standing up OSRM locally.
 
 import hashlib
 import json
+import math
 import os
 import time
 
@@ -16,6 +17,7 @@ import numpy as np
 import requests
 
 import config as C
+import progress
 
 
 def _cache_path(coords, closed, cache_dir):
@@ -72,7 +74,10 @@ def _request_chunk(coord_chunk):
             last_err = f"OSRM {r.status_code}: {r.text[:300]}"
         except requests.RequestException as e:
             last_err = str(e)
-        time.sleep(5 * (attempt + 1))
+        if attempt < 2:  # don't sleep after the last attempt, we're about to raise
+            wait = 5 * (attempt + 1)
+            with progress.spinner(f"OSRM request failed, retrying ({attempt + 2}/3) in {wait}s..."):
+                time.sleep(wait)
     raise RuntimeError(
         f"OSRM request failed after 3 attempts ({last_err}). "
         f"Is OSRM running at {C.OSRM_URL}? See scripts/osrm-setup.sh."
@@ -122,8 +127,11 @@ def fetch_legs(coords, closed, cache_dir=None, refresh=False):
 
     if os.path.exists(path) and not refresh:
         with open(path) as f:
-            print(f"  road cache hit ({path})")
-            return json.load(f)
+            legs = json.load(f)
+        total_verts = sum(len(l["verts"]) for l in legs)
+        total_km = sum(l["km"] for l in legs)
+        progress.done(f"{total_verts:,} road vertices, {total_km:,.0f} km (cached)")
+        return legs
 
     pts = [coords[i] for i in closed]
     n_legs = len(pts) - 1
@@ -132,14 +140,19 @@ def fetch_legs(coords, closed, cache_dir=None, refresh=False):
         legs = [_straight_leg(pts[i], pts[i + 1]) for i in range(n_legs)]
         with open(path, "w") as f:
             json.dump(legs, f)
+        progress.done(f"{n_legs} straight legs (routing disabled)")
         return legs
 
-    print(f"Fetching road geometry for {n_legs} legs from OSRM...")
     legs = [None] * n_legs
     batch = max(2, C.ROAD_BATCH)
     fallback_count = 0
+    # chunks overlap by one coordinate to stay continuous, so each chunk of
+    # `batch` points covers batch-1 legs
+    n_chunks = max(1, math.ceil(n_legs / (batch - 1)))
+    bar = progress.bar(n_chunks, unit=" chunks")
 
     i = 0
+    chunk_no = 0
     while i < len(pts) - 1:
         # overlap by one point so chunk boundaries stay continuous
         chunk = pts[i:i + batch]
@@ -150,6 +163,8 @@ def fetch_legs(coords, closed, cache_dir=None, refresh=False):
         for j, leg in enumerate(chunk_legs):
             legs[i + j] = leg
         i += len(chunk) - 1
+        chunk_no += 1
+        bar.update(chunk_no)
 
     for idx, leg in enumerate(legs):
         if leg is None:
@@ -158,12 +173,12 @@ def fetch_legs(coords, closed, cache_dir=None, refresh=False):
                 raise RuntimeError(f"Unroutable leg {idx} and ROUTE_FALLBACK_STRAIGHT is off.")
             legs[idx] = _straight_leg(pts[idx], pts[idx + 1])
 
-    if fallback_count:
-        print(f"  warning: {fallback_count}/{n_legs} legs fell back to straight lines")
-
     total_verts = sum(len(l["verts"]) for l in legs)
     total_km = sum(l["km"] for l in legs)
-    print(f"  {total_verts:,} road vertices, {total_km:,.0f} km")
+    summary = f"{total_verts:,} road vertices, {total_km:,.0f} km"
+    if fallback_count:
+        summary += f"  ({fallback_count}/{n_legs} legs fell back to straight lines)"
+    progress.done(summary)
 
     with open(path, "w") as f:
         json.dump(legs, f)

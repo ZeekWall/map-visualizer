@@ -100,7 +100,10 @@ def build(lons, lats, cum_dist, extent, stop_dist=None):
     whip_lat = blend(t, hook_lat[-1] if n_hook else wide_lat, dlat[0])
     whip_hw = np.exp(blend(t, np.log(hook_hw[-1] if n_hook else wide_hw), np.log(hw[0])))
 
-    t = _smoothstep(np.linspace(0, 1, n_reveal)) if n_reveal else np.zeros(0)
+    # stop one step short of t=1: that final step is supplied by the wrap back
+    # to frame 0 (which sits at the same wide_lon/wide_lat/wide_hw), so the
+    # loop doesn't hold on a duplicate frame at the seam
+    t = _smoothstep(np.linspace(0, 1, n_reveal + 1)[:-1]) if n_reveal else np.zeros(0)
     rev_lon = blend(t, dlon[-1], wide_lon)
     rev_lat = blend(t, dlat[-1], wide_lat)
     rev_hw = np.exp(blend(t, np.log(hw[-1]), np.log(wide_hw)))

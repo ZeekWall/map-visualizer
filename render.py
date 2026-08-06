@@ -2,7 +2,6 @@
 neon route on top, lays out the HUD, and pipes raw frames straight into ffmpeg."""
 
 import subprocess
-import sys
 import time
 
 import cv2
@@ -10,6 +9,7 @@ import numpy as np
 
 import config as C
 import gfx
+import progress
 
 
 KM_PER_MI = 1.609344
@@ -106,6 +106,14 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
             last = i
         since[i] = i - last
 
+    # seamless loop: dissolve the route/dots/HUD over the tail of the reveal so
+    # the last frame converges on frame 0 (bare basemap + city labels) -- the
+    # camera itself already loops exactly (reveal ends at the same wide shot
+    # the hook starts from), so this is purely a content fade.
+    fade_frames = int(round(C.LOOP_FADE_SEC * C.FPS))
+    reveal_start = int(np.argmax(cam["phase"] == "reveal")) if n_frames else 0
+    fade_start = max(n_frames - fade_frames, reveal_start)
+
     city_lon = np.array([c["lon"] for c in cities]) if cities else np.zeros(0)
     city_lat = np.array([c["lat"] for c in cities]) if cities else np.zeros(0)
     city_name = [c["name"] for c in cities]
@@ -121,11 +129,19 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
 
     t0 = time.time()
+    bar = progress.bar(n_frames, unit=" frames")
     for i in range(n_frames):
         clon, clat, hw = cam["lon"][i], cam["lat"][i], cam["hw"][i]
         phase, pt, arc = cam["phase"][i], cam["ptime"][i], cam["arc"][i]
         box = vp.bounds(clon, clat, hw)
         canvas = vp.crop(box).astype(np.float32)
+
+        lf = 0.0
+        if C.LOOP_SEAMLESS and i >= fade_start:
+            # denominator +1 keeps lf just under 1.0 on the final frame, so it
+            # doesn't sit as a duplicate-looking still right before the wrap
+            lf = gfx.ease_in_out((i - fade_start + 1) / (n_frames - fade_start + 1))
+        pre = canvas.copy() if lf > 0 else None
 
         # zoom-independent scale factor for anything that should stay readable
         zf = float(np.clip(C.ZOOM_MAX_DEG / hw, 0.35, 1.6))
@@ -196,6 +212,12 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
             gfx.head_flare(canvas, sx[0], sy[0], C.ACCENT, size=max(24, int(S(170))),
                            intensity=0.5 * ignite)
 
+        if pre is not None:
+            # dissolve everything drawn above back to the bare basemap crop,
+            # which is what frame 0 already is -- makes the loop seamless
+            canvas *= (1 - lf)
+            canvas += pre * lf
+
         # ---- city labels at constant screen size
         if len(city_lon):
             keep = 6 if hw > 4 else 14
@@ -212,22 +234,24 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
 
         canvas *= vignette
 
-        _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit, total_hours)
+        _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit, total_hours,
+            fade=1.0 - lf)
 
         proc.stdin.write(np.clip(canvas, 0, 255).astype(np.uint8).tobytes())
-
-        if i % 30 == 0 or i == n_frames - 1:
-            el = time.time() - t0
-            eta = el / max(i + 1, 1) * (n_frames - i - 1)
-            sys.stdout.write(f"\r  frame {i + 1}/{n_frames}  {el:.0f}s elapsed  ~{eta:.0f}s left  ")
-            sys.stdout.flush()
+        bar.update(i + 1)
 
     proc.stdin.close()
     proc.wait()
-    print(f"\n  wrote {out_path} ({time.time() - t0:.0f}s)")
+    progress.done(f"wrote {out_path} ({time.time() - t0:.0f}s)")
 
 
-def _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit, total_hours=None):
+def _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit, total_hours=None,
+        fade=1.0):
+    """fade: 1.0 normally; ramps to 0.0 during the loop-seamless dissolve at
+    the tail of the reveal (see LOOP_SEAMLESS in render()). Named `loop_fade`
+    inside the reveal branch below since `fade` is already used locally for
+    the whip fade-in."""
+    loop_fade = fade
     CX = C.OUT_W // 2
     TW = C.OUT_W - 2 * S(C.TEXT_MARGIN)   # usable headline width
 
@@ -277,7 +301,7 @@ def _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit, total_hours=N
         return
 
     # ---- reveal
-    t = gfx.ease_out_cubic(pt / 0.45)
+    t = gfx.ease_out_cubic(pt / 0.45) * loop_fade
     gfx.panel(canvas, CX - S(430), S(1010), S(860), S(430), alpha=0.62 * t)
     gfx.draw_text(canvas, C.REVEAL_LINE, S(104), (CX, S(300)), C.TEXT, C.NEON_MID,
                   glow_sigma=S(32), glow_gain=0.95, alpha=t, letter_spacing=S(3),
@@ -295,7 +319,7 @@ def _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit, total_hours=N
         (fmt_int(hours), "HOURS DRIVING"),
     ]
     for ri, (val, lab) in enumerate(rows):
-        tt = gfx.ease_out_cubic(gfx.clamp01((pt - 0.18 - 0.11 * ri) / 0.28))
+        tt = gfx.ease_out_cubic(gfx.clamp01((pt - 0.18 - 0.11 * ri) / 0.28)) * loop_fade
         y = S(1090 + ri * 140)
         gfx.draw_odometer(canvas, val, S(96), (CX - S(30), y + S(26) * (1 - tt)),
                           C.TEXT, C.NEON_MID, anchor="rm", alpha=tt)

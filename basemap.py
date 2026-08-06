@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image
 
 import config as C
+import progress
 
 
 def _meta_path(d):
@@ -35,10 +36,9 @@ def build(force=False):
         with open(_meta_path(d)) as f:
             meta = json.load(f)
         if meta.get("extent") == C.REGION_EXTENT and meta.get("width") == C.BASEMAP_PX_WIDE:
-            print("  basemap cache hit")
+            progress.done(f"{meta['width']}x{meta['height']} (cached)")
             return _load(d)
 
-    print("Rendering basemap (one time, this is the slow part)...")
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -95,36 +95,39 @@ def build(force=False):
         edgecolor=f(C.LAND_EDGE), linewidth=bw / 1600, zorder=4,
     )
 
-    fig.canvas.draw()
-    img = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
-    plt.close(fig)
+    with progress.spinner("rendering (first run also fetches Natural Earth data)..."):
+        fig.canvas.draw()
+        img = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
+        plt.close(fig)
 
-    Image.fromarray(img).save(_png_path(d), optimize=False)
+    with progress.spinner("saving raster..."):
+        Image.fromarray(img).save(_png_path(d), optimize=False)
 
     # City labels are drawn per-frame at constant screen size, so they only need
     # coordinates here -- baking the text into the raster would make labels scale
     # with the zoom and become unreadable at both ends.
     cities = []
-    try:
-        shp = shpreader.natural_earth(resolution="10m", category="cultural",
-                                      name="populated_places")
-        for rec in shpreader.Reader(shp).records():
-            a = rec.attributes
-            pop = a.get("POP_MAX") or 0
-            x, y = rec.geometry.x, rec.geometry.y
-            if pop >= C.CITY_MIN_POP and W <= x <= E and S <= y <= N:
-                cities.append({"name": a.get("NAME"), "lon": float(x),
-                               "lat": float(y), "pop": int(pop)})
-        cities.sort(key=lambda c: -c["pop"])
-    except Exception as e:
-        print(f"  skipped city labels: {e}")
+    with progress.spinner("scanning populated places..."):
+        try:
+            shp = shpreader.natural_earth(resolution="10m", category="cultural",
+                                          name="populated_places")
+            for rec in shpreader.Reader(shp).records():
+                a = rec.attributes
+                pop = a.get("POP_MAX") or 0
+                x, y = rec.geometry.x, rec.geometry.y
+                if pop >= C.CITY_MIN_POP and W <= x <= E and S <= y <= N:
+                    cities.append({"name": a.get("NAME"), "lon": float(x),
+                                   "lat": float(y), "pop": int(pop)})
+            cities.sort(key=lambda c: -c["pop"])
+        except Exception as e:
+            print(f"  skipped city labels: {e}")
 
     with open(_cities_path(d), "w") as fh:
         json.dump(cities, fh)
     with open(_meta_path(d), "w") as fh:
         json.dump({"extent": C.REGION_EXTENT, "width": bw, "height": bh}, fh)
 
-    print(f"  basemap {bw}x{bh}, {len(cities)} city labels")
+    progress.done(f"{bw}x{bh}, {len(cities)} city labels")
     return _load(d)
 
 

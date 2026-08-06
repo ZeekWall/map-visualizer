@@ -1,9 +1,9 @@
 """All the knobs. Edit this file, re-run main.py."""
 
 # ---------------------------------------------------------------- data source
-PLACE_NAME = "Starbucks"          # OSM brand= value
+PLACE_NAME = "McDonald's"          # OSM brand= value
 PLACE_MAIN_TYPE = "amenity"       # e.g. "amenity" for fast_food, "shop" for retail
-PLACE_TYPE = "cafe"       # e.g. "fast_food", "wholesale", "supermarket"
+PLACE_TYPE = "fast_food"       # e.g. "fast_food", "wholesale", "supermarket"
 
 REGION_NAME = "Texas"          # OSM admin_level=4 area name
 REGION_EXTENT = [-106.7, -93.5, 25.5, 36.6]   # west, east, south, north
@@ -63,6 +63,10 @@ ROAD_BATCH = 50                 # coords per OSRM /route request
 ROAD_SIMPLIFY_DEG = 0.0005      # ~55m; drop vertices closer together than this
 ROUTE_FALLBACK_STRAIGHT = True  # unroutable leg -> straight segment instead of aborting
 TAIL_KM = 35                    # arc-length of the bright neon tail behind the head
+
+# ---------------------------------------------------------------- loop
+LOOP_SEAMLESS = True   # dissolve the reveal so the last frame matches frame 0
+LOOP_FADE_SEC = 0.6    # length of that dissolve
 
 # ---------------------------------------------------------------- theme
 BG          = (5, 7, 15)

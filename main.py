@@ -7,6 +7,7 @@ import numpy as np
 import basemap
 import camera
 import config as C
+import progress
 import render
 import route
 import routing
@@ -14,8 +15,8 @@ from overpassapi import getPlaces
 
 
 def load_coords(refresh=False):
-    places = getPlaces(C.PLACE_NAME, C.PLACE_MAIN_TYPE, C.PLACE_TYPE,
-                       C.REGION_NAME, refresh=refresh)
+    places, cached = getPlaces(C.PLACE_NAME, C.PLACE_MAIN_TYPE, C.PLACE_TYPE,
+                               C.REGION_NAME, refresh=refresh)
     pts = []
     for p in places:
         try:
@@ -30,7 +31,8 @@ def load_coords(refresh=False):
     # OSM often has a drive-thru node and a building way for the same store
     _, keep = np.unique(np.round(coords, 4), axis=0, return_index=True)
     coords = coords[np.sort(keep)]
-    print(f"{len(coords)} {C.PLACE_NAME} locations in {C.REGION_NAME}")
+    tag = " (cached)" if cached else ""
+    progress.done(f"{len(coords)} {C.PLACE_NAME} locations in {C.REGION_NAME}{tag}")
     return coords
 
 
@@ -91,21 +93,34 @@ def main():
     ap.add_argument("--seconds", type=float, default=None)
     ap.add_argument("--preview", action="store_true",
                     help="540x960 @ 15fps for a fast look")
+    ap.add_argument("--quiet", action="store_true",
+                    help="disable progress output")
     args = ap.parse_args()
+
+    if args.quiet:
+        progress.enabled = False
 
     if args.seconds:
         C.DURATION_SEC = args.seconds
     if args.preview:
         C.OUT_W, C.OUT_H, C.FPS, C.CRF, C.PRESET = 540, 960, 15, 26, "veryfast"
 
+    progress.step(1, 6, "Places")
     coords = load_coords(refresh=args.refresh_places)
+
+    progress.step(2, 6, "Route")
     tour, D, length = route.solve(coords, C.SOLVER_TIME_BUDGET, C.ROUTE_CACHE)
 
+    progress.step(3, 6, "Roads")
     lons, lats, cum_dist, stop_vert, stop_dist, total_hours = assemble_path(
         coords, tour, refresh_roads=args.refresh_roads)
 
+    progress.step(4, 6, "Basemap")
     img, meta, cities = basemap.build(force=args.rebuild_basemap)
+
+    progress.step(5, 6, "Camera")
     cam = camera.build(lons, lats, cum_dist, C.REGION_EXTENT, stop_dist)
+    progress.done(f"{cam['n']} frames planned")
 
     out = C.OUT_FILE or "{}_{}_tiktok.mp4".format(
         re.sub(r"[^A-Za-z0-9]+", "", C.PLACE_NAME),
@@ -113,7 +128,7 @@ def main():
     if args.preview:
         out = out.replace(".mp4", "_preview.mp4")
 
-    print(f"Rendering {cam['n']} frames at {C.OUT_W}x{C.OUT_H}...")
+    progress.step(6, 6, "Render")
     render.render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
                   cam, img, meta, cities, out)
     print(f"Done: {os.path.abspath(out)}")

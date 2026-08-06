@@ -12,6 +12,8 @@ import time
 
 import numpy as np
 
+import progress
+
 
 def haversine_matrix(coords):
     """coords: (n, 2) array of [lat, lon] in degrees. Returns km distances."""
@@ -116,6 +118,7 @@ def optimize(D, tour, time_budget=45.0, k=12, verbose=True):
     best_len = tour_length(D, tour)
     start_len = best_len
     moves = 0
+    bar = progress.bar(time_budget, unit="s") if verbose else None
 
     while time.time() - t0 < time_budget:
         mv = two_opt_pass(D, tour, pos, cand)
@@ -124,6 +127,8 @@ def optimize(D, tour, time_budget=45.0, k=12, verbose=True):
             tour[i + 1:j + 1] = tour[i + 1:j + 1][::-1]
             pos[tour] = np.arange(n)
             moves += 1
+            if bar:
+                bar.update(time.time() - t0)
             continue
 
         mv = or_opt_pass(D, tour, pos, cand)
@@ -139,12 +144,14 @@ def optimize(D, tour, time_budget=45.0, k=12, verbose=True):
         tour = np.array(rest[:at] + seg + rest[at:], dtype=np.int64)
         pos[tour] = np.arange(n)
         moves += 1
+        if bar:
+            bar.update(time.time() - t0)
 
     best_len = tour_length(D, tour)
     if verbose:
-        print(f"  {n} stops | {start_len:,.0f} km -> {best_len:,.0f} km "
-              f"({100 * (1 - best_len / start_len):.1f}% better, {moves} moves, "
-              f"{time.time() - t0:.0f}s)")
+        progress.done(f"{n} stops | {start_len:,.0f} km -> {best_len:,.0f} km "
+                      f"({100 * (1 - best_len / start_len):.1f}% better, {moves} moves, "
+                      f"{time.time() - t0:.0f}s)")
     return tour.tolist(), best_len
 
 
@@ -176,10 +183,9 @@ def solve(coords, time_budget=45.0, cache_dir="cache/route", start="south"):
     if os.path.exists(path):
         with open(path) as f:
             blob = json.load(f)
-        print(f"  route cache hit ({blob['length_km']:,.0f} km)")
+        progress.done(f"{blob['length_km']:,.0f} km (cached)")
         return blob["tour"], D, blob["length_km"]
 
-    print("Solving TSP...")
     t0 = nearest_neighbor_tour(D, start=0)
     tour, length = optimize(D, t0, time_budget=time_budget)
     tour = rotate_start(coords, tour, start)

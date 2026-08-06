@@ -7,6 +7,8 @@ import time
 
 import requests
 
+import progress
+
 CACHE_DIR = "cache/places"
 API_URL = "https://overpass-api.de/api/interpreter"
 
@@ -26,13 +28,15 @@ def getPlaces(placeName, placeMainType, placeType, region="Texas", refresh=False
 
     The cache is keyed on the full query, so switching PLACE_NAME actually
     refetches instead of silently reusing the previous brand's file.
+
+    Returns (places, cached).
     """
     os.makedirs(CACHE_DIR, exist_ok=True)
     path = _cache_path(placeName, placeMainType, placeType, region)
 
     if os.path.exists(path) and not refresh:
         with open(path, "r", newline="", encoding="utf-8") as f:
-            return list(csv.DictReader(f, delimiter="\t"))
+            return list(csv.DictReader(f, delimiter="\t")), True
 
     query = f"""
     [out:csv(::id,::lat,::lon,name,brand)][timeout:180];
@@ -42,21 +46,25 @@ def getPlaces(placeName, placeMainType, placeType, region="Texas", refresh=False
     """
 
     last_err = None
-    for attempt in range(3):
-        try:
-            r = requests.post(
-                API_URL,
-                headers={"User-Agent": "map-visualizer (github.com/ZeekWall)"},
-                data={"data": query},
-                timeout=180,
-            )
-            if r.status_code == 200:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(r.text)
-                return list(csv.DictReader(io.StringIO(r.text), delimiter="\t"))
-            last_err = f"Overpass {r.status_code}: {r.text[:300]}"
-        except requests.RequestException as e:
-            last_err = str(e)
-        time.sleep(5 * (attempt + 1))  # Overpass rate-limits; back off
+    with progress.spinner("fetching from Overpass...") as sp:
+        for attempt in range(3):
+            try:
+                r = requests.post(
+                    API_URL,
+                    headers={"User-Agent": "map-visualizer (github.com/ZeekWall)"},
+                    data={"data": query},
+                    timeout=180,
+                )
+                if r.status_code == 200:
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(r.text)
+                    return list(csv.DictReader(io.StringIO(r.text), delimiter="\t")), False
+                last_err = f"Overpass {r.status_code}: {r.text[:300]}"
+            except requests.RequestException as e:
+                last_err = str(e)
+            if attempt < 2:  # don't sleep after the last attempt, we're about to raise
+                wait = 5 * (attempt + 1)  # Overpass rate-limits; back off
+                sp.text = f"attempt {attempt + 2}/3 in {wait}s (last: {last_err[:60]})"
+                time.sleep(wait)
 
     raise RuntimeError(f"Overpass failed after 3 attempts: {last_err}")
