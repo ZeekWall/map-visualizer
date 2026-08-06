@@ -74,24 +74,35 @@ def fmt_int(v):
     return f"{int(round(v)):,}"
 
 
-def render(lons, lats, cum_dist, cam, basemap_img, meta, cities, out_path):
+def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
+          cam, basemap_img, meta, cities, out_path):
+    """lons/lats/cum_dist are per road-vertex (dense). stop_vert[s] is the
+    vertex index of stop s; stop_dist is cum_dist[stop_vert]. When routing is
+    disabled every vertex is a stop, so stop_vert == arange(n) and the two
+    index spaces collapse back to the old behaviour."""
     global _S
     _S = C.OUT_W / 1080.0
     vp = Viewport(basemap_img, meta)
     n_frames = cam["n"]
     total_km = cum_dist[-1]
-    n_stops = len(cum_dist) - 1
+    n_stops = len(stop_dist) - 1
     unit = "MI" if C.USE_MILES else "KM"
     conv = (1 / KM_PER_MI) if C.USE_MILES else 1.0
 
     vignette = gfx.make_vignette(C.OUT_W, C.OUT_H)
 
-    stop_idx = np.clip(np.searchsorted(cum_dist, cam["arc"], side="right") - 1, 0, n_stops)
+    # vert_idx: which road-vertex segment the head is currently on (for path
+    # geometry). stop_no: which store has most recently been visited (for the
+    # HUD counter and the pending/visited dot masks).
+    vert_idx = np.clip(np.searchsorted(cum_dist, cam["arc"], side="right") - 1,
+                       0, len(cum_dist) - 2)
+    stop_no = np.clip(np.searchsorted(stop_dist, cam["arc"], side="right") - 1,
+                      0, n_stops)
     # frames since the counter last ticked -> drives the per-stop pop
     since = np.zeros(n_frames)
     last = -999
     for i in range(n_frames):
-        if i > 0 and stop_idx[i] != stop_idx[i - 1]:
+        if i > 0 and stop_no[i] != stop_no[i - 1]:
             last = i
         since[i] = i - last
 
@@ -120,9 +131,13 @@ def render(lons, lats, cum_dist, cam, basemap_img, meta, cities, out_path):
         zf = float(np.clip(C.ZOOM_MAX_DEG / hw, 0.35, 1.6))
 
         sx, sy = vp.project(lons, lats, box)
-        on = (sx > -80) & (sx < C.OUT_W + 80) & (sy > -80) & (sy < C.OUT_H + 80)
+        # stop-only screen coords, used for dots/rings which should land on
+        # stores, not on the dense road-vertex geometry
+        psx, psy = sx[stop_vert], sy[stop_vert]
+        on_stops = (psx > -80) & (psx < C.OUT_W + 80) & (psy > -80) & (psy < C.OUT_H + 80)
 
-        k = int(stop_idx[i])
+        v = int(vert_idx[i])   # road-vertex segment the head is currently on
+        k = int(stop_no[i])    # most recently visited store
         ignite = gfx.ease_out_cubic(pt / 0.55) if phase == "hook" else 1.0
 
         # ---- pending stops (dim), visited stops (lit)
@@ -131,43 +146,46 @@ def render(lons, lats, cum_dist, cam, basemap_img, meta, cities, out_path):
             gfx.flat_polyline(canvas, np.c_[sx, sy], C.DOT_PENDING,
                               width=max(1, int(S(3) * zf)), alpha=0.85)
 
-        pending = on.copy()
+        pending = on_stops.copy()
         pending[:k + 1] = False
         if pending.any():
-            gfx.flat_dots(canvas, np.c_[sx[pending], sy[pending]],
+            gfx.flat_dots(canvas, np.c_[psx[pending], psy[pending]],
                           C.DOT_PENDING, radius=max(2, int(S(5) * zf)),
                           alpha=0.9 * ignite)
 
         if phase != "hook":
             # ---- travelled route
-            seg = min(k + 1, len(sx) - 1)
+            seg = min(v + 1, len(sx) - 1)
             frac = 0.0
-            if cum_dist[seg] > cum_dist[k]:
-                frac = (arc - cum_dist[k]) / (cum_dist[seg] - cum_dist[k])
-            hx = sx[k] + frac * (sx[seg] - sx[k])
-            hy = sy[k] + frac * (sy[seg] - sy[k])
+            if cum_dist[seg] > cum_dist[v]:
+                frac = (arc - cum_dist[v]) / (cum_dist[seg] - cum_dist[v])
+            hx = sx[v] + frac * (sx[seg] - sx[v])
+            hy = sy[v] + frac * (sy[seg] - sy[v])
 
-            path = np.c_[np.append(sx[:k + 1], hx), np.append(sy[:k + 1], hy)]
+            path = np.c_[np.append(sx[:v + 1], hx), np.append(sy[:v + 1], hy)]
             gfx.neon_polyline(
                 canvas, path, C.NEON_CORE, C.NEON_MID, C.NEON_OUTER,
                 core_w=max(2, int(S(5) * zf)), mid_w=max(3, int(S(10) * zf)), intensity=0.85,
             )
-            tail = path[max(0, len(path) - 26):]
+            # hot tail is arc-length based (not vertex-count based), since a
+            # road leg can be anywhere from a few vertices to a few hundred
+            tail_cut = int(np.clip(np.searchsorted(cum_dist, arc - C.TAIL_KM), 0, len(path) - 1))
+            tail = path[tail_cut:]
             gfx.neon_polyline(
                 canvas, tail, C.NEON_CORE, C.NEON_CORE, C.NEON_MID,
                 core_w=max(2, int(S(6) * zf)), mid_w=max(3, int(S(13) * zf)), intensity=0.6,
             )
 
-            vis = on.copy()
+            vis = on_stops.copy()
             vis[k + 1:] = False
             if vis.any():
-                gfx.neon_dots(canvas, np.c_[sx[vis], sy[vis]], C.DOT_VISITED,
+                gfx.neon_dots(canvas, np.c_[psx[vis], psy[vis]], C.DOT_VISITED,
                               radius=max(2, int(S(7) * zf)), glow_sigma=S(16) * zf,
                               intensity=0.9)
 
             age = since[i] / (0.55 * C.FPS)
             if age < 1.0:
-                gfx.ring(canvas, sx[k], sy[k], S(28) * zf + S(150) * zf * age,
+                gfx.ring(canvas, psx[k], psy[k], S(28) * zf + S(150) * zf * age,
                          C.NEON_MID, width=max(1, int(S(4) * zf)),
                          alpha=0.85 * (1 - age) ** 2)
             pop = float(np.exp(-since[i] / (0.16 * C.FPS)))
@@ -194,7 +212,7 @@ def render(lons, lats, cum_dist, cam, basemap_img, meta, cities, out_path):
 
         canvas *= vignette
 
-        _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit)
+        _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit, total_hours)
 
         proc.stdin.write(np.clip(canvas, 0, 255).astype(np.uint8).tobytes())
 
@@ -209,7 +227,7 @@ def render(lons, lats, cum_dist, cam, basemap_img, meta, cities, out_path):
     print(f"\n  wrote {out_path} ({time.time() - t0:.0f}s)")
 
 
-def _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit):
+def _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit, total_hours=None):
     CX = C.OUT_W // 2
     TW = C.OUT_W - 2 * S(C.TEXT_MARGIN)   # usable headline width
 
@@ -265,7 +283,12 @@ def _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit):
                   glow_sigma=S(32), glow_gain=0.95, alpha=t, letter_spacing=S(3),
                   max_width=TW)
 
-    hours = (total_km * conv) / (C.AVG_SPEED_MPH if C.USE_MILES else C.AVG_SPEED_MPH * KM_PER_MI)
+    if total_hours is not None:
+        # real summed OSRM leg duration, when road routing is available
+        hours = total_hours
+    else:
+        # fallback: constant-speed estimate against whatever distance we have
+        hours = (total_km * conv) / (C.AVG_SPEED_MPH if C.USE_MILES else C.AVG_SPEED_MPH * KM_PER_MI)
     rows = [
         (fmt_int(total_km * conv), f"{unit} TOTAL"),
         (fmt_int(n_stops), "STOPS HIT"),

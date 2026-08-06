@@ -34,7 +34,14 @@ def wide_half_width(extent, out_w, out_h):
     return max(need_w, need_from_h) * 1.12
 
 
-def build(lons, lats, cum_dist, extent):
+def build(lons, lats, cum_dist, extent, stop_dist=None):
+    """lons/lats/cum_dist are per road-vertex (dense). stop_dist is the
+    per-stop cumulative distance (cum_dist[stop_vert]) used to blend DRIVE
+    pacing between constant-speed and constant-stops; defaults to cum_dist
+    itself when every vertex is a stop (routing disabled)."""
+    if stop_dist is None:
+        stop_dist = cum_dist
+
     total_frames = int(C.FPS * C.DURATION_SEC)
     n_hook = int(total_frames * C.ACT_HOOK)
     n_whip = int(total_frames * C.ACT_WHIP)
@@ -42,12 +49,12 @@ def build(lons, lats, cum_dist, extent):
     n_drive = total_frames - n_hook - n_whip - n_reveal
 
     total = cum_dist[-1]
-    n_seg = len(cum_dist) - 1
+    n_stops = len(stop_dist) - 1
 
     # ---- DRIVE: arc position blended between constant-speed and constant-stops
     u = np.linspace(0.0, 1.0, n_drive)
     d_by_dist = u * total
-    d_by_stop = np.interp(u * n_seg, np.arange(n_seg + 1), cum_dist)
+    d_by_stop = np.interp(u * n_stops, np.arange(n_stops + 1), stop_dist)
     d = C.DISTANCE_WEIGHT * d_by_dist + (1 - C.DISTANCE_WEIGHT) * d_by_stop
     d = np.maximum.accumulate(d)
 

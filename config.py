@@ -1,9 +1,9 @@
 """All the knobs. Edit this file, re-run main.py."""
 
 # ---------------------------------------------------------------- data source
-PLACE_NAME = "Whataburger"          # OSM brand= value
+PLACE_NAME = "Starbucks"          # OSM brand= value
 PLACE_MAIN_TYPE = "amenity"       # e.g. "amenity" for fast_food, "shop" for retail
-PLACE_TYPE = "fast_food"       # e.g. "fast_food", "wholesale", "supermarket"
+PLACE_TYPE = "cafe"       # e.g. "fast_food", "wholesale", "supermarket"
 
 REGION_NAME = "Texas"          # OSM admin_level=4 area name
 REGION_EXTENT = [-106.7, -93.5, 25.5, 36.6]   # west, east, south, north
@@ -52,6 +52,18 @@ AVG_SPEED_MPH = 62             # for the "hours of driving" payoff stat
 SOLVER_TIME_BUDGET = 45        # seconds for 2-opt / Or-opt improvement
 ROUTE_CACHE = "cache/route"
 
+# ---------------------------------------------------------------- routing
+# Road-routed legs via a self-hosted OSRM instance (see scripts/osrm-setup.sh).
+# When disabled, legs fall back to straight great-circle segments (old behaviour).
+ROUTING_ENABLED = True
+OSRM_URL = "http://localhost:5000"
+OSRM_PROFILE = "driving"
+ROAD_CACHE = "cache/roads"
+ROAD_BATCH = 50                 # coords per OSRM /route request
+ROAD_SIMPLIFY_DEG = 0.0005      # ~55m; drop vertices closer together than this
+ROUTE_FALLBACK_STRAIGHT = True  # unroutable leg -> straight segment instead of aborting
+TAIL_KM = 35                    # arc-length of the bright neon tail behind the head
+
 # ---------------------------------------------------------------- theme
 BG          = (5, 7, 15)
 LAND        = (11, 16, 32)
@@ -64,8 +76,8 @@ NEON_MID    = (0, 214, 255)     # cyan
 NEON_OUTER  = (255, 43, 214)    # magenta bloom
 HEAD_COLOR  = (255, 255, 255)
 
-DOT_VISITED = (0, 214, 255)
-DOT_PENDING = (48, 70, 112)
+DOT_VISITED = (240, 0, 0)
+DOT_PENDING = (153, 0, 0)
 TEXT        = (255, 255, 255)
 TEXT_DIM    = (150, 170, 205)
 ACCENT      = (255, 43, 214)

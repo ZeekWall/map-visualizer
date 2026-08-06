@@ -9,6 +9,7 @@ import camera
 import config as C
 import render
 import route
+import routing
 from overpassapi import getPlaces
 
 
@@ -33,9 +34,59 @@ def load_coords(refresh=False):
     return coords
 
 
+def assemble_path(coords, tour, refresh_roads=False):
+    """Turn the solved stop order into road-routed (or straight, if routing is
+    disabled) vertex geometry.
+
+    Returns:
+      lons, lats, cum_dist  - per road-vertex, parallel arrays (cum_dist in km)
+      stop_vert             - stop_vert[s] = vertex index of stop s
+      stop_dist             - cum_dist[stop_vert], i.e. per-stop cumulative km
+      total_hours           - summed OSRM leg duration, or None if unavailable
+    """
+    closed = list(tour) + [tour[0]]
+    legs = routing.fetch_legs(coords, closed, refresh=refresh_roads)
+
+    verts = []
+    stop_vert = [0]
+    for leg in legs:
+        lv = leg["verts"][1:] if verts else leg["verts"]
+        verts.extend(lv)
+        stop_vert.append(len(verts) - 1)
+    stop_vert = np.array(stop_vert)
+
+    ordered = np.array(verts, dtype=np.float64)
+    lats, lons = ordered[:, 0], ordered[:, 1]
+
+    # raw per-vertex haversine cumulative distance, then rescaled leg-by-leg to
+    # match OSRM's reported road km (keeps the odometer honest while cum_dist
+    # stays monotonic, which camera.build / render both rely on)
+    raw = np.zeros(len(ordered))
+    if len(ordered) > 1:
+        lat1, lat2 = np.radians(lats[:-1]), np.radians(lats[1:])
+        dlat, dlon = np.radians(np.diff(lats)), np.radians(np.diff(lons))
+        a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
+        seg_km = 2 * 6371.0088 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+        raw[1:] = np.cumsum(seg_km)
+
+    cum_dist = np.zeros(len(ordered))
+    for s, leg in enumerate(legs):
+        v0, v1 = stop_vert[s], stop_vert[s + 1]
+        raw_len = raw[v1] - raw[v0]
+        scale = leg["km"] / raw_len if raw_len > 1e-9 else 1.0
+        cum_dist[v0:v1 + 1] = cum_dist[v0] + (raw[v0:v1 + 1] - raw[v0]) * scale
+
+    stop_dist = cum_dist[stop_vert]
+    secs = [leg["sec"] for leg in legs]
+    total_hours = sum(secs) / 3600.0 if all(s is not None for s in secs) else None
+
+    return lons, lats, cum_dist, stop_vert, stop_dist, total_hours
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--refresh-places", action="store_true")
+    ap.add_argument("--refresh-roads", action="store_true")
     ap.add_argument("--rebuild-basemap", action="store_true")
     ap.add_argument("--seconds", type=float, default=None)
     ap.add_argument("--preview", action="store_true",
@@ -50,14 +101,11 @@ def main():
     coords = load_coords(refresh=args.refresh_places)
     tour, D, length = route.solve(coords, C.SOLVER_TIME_BUDGET, C.ROUTE_CACHE)
 
-    closed = list(tour) + [tour[0]]
-    ordered = coords[closed]
-    lats, lons = ordered[:, 0], ordered[:, 1]
-    seg = D[closed[:-1], closed[1:]]
-    cum_dist = np.concatenate([[0.0], np.cumsum(seg)])
+    lons, lats, cum_dist, stop_vert, stop_dist, total_hours = assemble_path(
+        coords, tour, refresh_roads=args.refresh_roads)
 
     img, meta, cities = basemap.build(force=args.rebuild_basemap)
-    cam = camera.build(lons, lats, cum_dist, C.REGION_EXTENT)
+    cam = camera.build(lons, lats, cum_dist, C.REGION_EXTENT, stop_dist)
 
     out = C.OUT_FILE or "{}_{}_tiktok.mp4".format(
         re.sub(r"[^A-Za-z0-9]+", "", C.PLACE_NAME),
@@ -66,7 +114,8 @@ def main():
         out = out.replace(".mp4", "_preview.mp4")
 
     print(f"Rendering {cam['n']} frames at {C.OUT_W}x{C.OUT_H}...")
-    render.render(lons, lats, cum_dist, cam, img, meta, cities, out)
+    render.render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
+                  cam, img, meta, cities, out)
     print(f"Done: {os.path.abspath(out)}")
 
 

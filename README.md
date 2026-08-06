@@ -9,6 +9,11 @@ python main.py --preview      # 540x960 @ 15fps, ~40s, for checking framing
 python main.py                # 1080x1920 @ 30fps, ~5 min
 ```
 
+Legs are road-routed by default via a self-hosted OSRM instance (see
+[Road routing](#road-routing) below). Set `ROUTING_ENABLED = False` in
+`config.py` to fall back to straight great-circle legs and skip the OSRM
+dependency entirely.
+
 Output: `Costco_Texas_tiktok.mp4`, H.264 / yuv420p / +faststart.
 
 ## Shot structure
@@ -26,12 +31,41 @@ Change the split with `ACT_*` in `config.py` — they must sum to 1.0.
 
 - `config.py` — every knob. Brand, region, colours, timing, copy.
 - `overpassapi.py` — Overpass fetch, cached per query.
-- `route.py` — haversine matrix, nearest-neighbour seed, 2-opt + Or-opt.
+- `route.py` — haversine matrix, nearest-neighbour seed, 2-opt + Or-opt. Still
+  solves stop *order* on great-circle distance — only the drawn geometry and
+  distance/duration come from roads.
+- `routing.py` — road-routed leg geometry via OSRM, cached per tour.
 - `basemap.py` — one-time Cartopy render, cached as PNG + JSON.
 - `camera.py` — precomputes the full camera path before rendering.
 - `gfx.py` — neon primitives, text, odometer, easing.
 - `render.py` — frame compositor, pipes raw frames to ffmpeg.
 - `contact_sheet.py` — `python contact_sheet.py out.mp4 1.5 8 20 29` to eyeball frames.
+
+## Road routing
+
+Stop *order* is still solved on the haversine matrix (fast, no network calls
+for 1,300+ stops). Once the tour is fixed, `routing.py` fetches real road
+geometry, distance, and duration for each leg from a self-hosted
+[OSRM](https://project-osrm.org/) instance — the neon line follows actual
+highways instead of cutting straight across the map, and "MI DRIVEN" / "HOURS
+DRIVING" report real numbers instead of great-circle estimates.
+
+One-time setup (needs Docker):
+
+```
+scripts/osrm-setup.sh north-america/us/texas
+```
+
+This downloads a Geofabrik `.osm.pbf` extract into `./osrm/`, builds the OSRM
+graph, and serves it on `http://localhost:5000`. The extract must cover
+`REGION_NAME`/`REGION_EXTENT` in `config.py` — switching states means
+re-running the script against a new extract (see
+[download.geofabrik.de](https://download.geofabrik.de) for available
+regions). Leave OSRM running and just `python main.py` as usual; results are
+cached per-tour in `cache/roads/`, use `--refresh-roads` to force a refetch.
+
+Relevant knobs in `config.py`: `ROUTING_ENABLED`, `OSRM_URL`, `OSRM_PROFILE`,
+`ROAD_BATCH`, `ROAD_SIMPLIFY_DEG`, `ROUTE_FALLBACK_STRAIGHT`, `TAIL_KM`.
 
 ## What changed from the original
 
@@ -96,8 +130,13 @@ for a new brand may need a retry; results are cached after that.
 
 ## Known trade-offs
 
-- The route is straight-line, not road-routed. "Hours driving" is
-  `AVG_SPEED_MPH` against great-circle distance, so treat it as flavour.
+- Stop *order* is still solved on great-circle distance, not road distance —
+  see [Road routing](#road-routing). For most regions the ordering barely
+  changes; a true road-distance solve would need an OSRM `/table` matrix,
+  which doesn't scale past a few hundred stops without chunking.
+- With `ROUTING_ENABLED = False` (or no OSRM reachable), legs fall back to
+  straight great-circle segments and "hours driving" reverts to
+  `AVG_SPEED_MPH` against that distance — treat it as flavour in that mode.
 - Basemap detail at the widest shot is soft, since one raster is tuned for the
   mid-zoom follow cam. Raise `BASEMAP_PX_WIDE` if that bothers you (memory grows
   roughly with the square).
