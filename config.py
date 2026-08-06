@@ -27,9 +27,9 @@ ACT_REVEAL = 0.14              # pull back out, full loop + final stats
 # Zoom is derived from how far the camera travels in LOOKAHEAD_SEC, so on-screen
 # speed stays roughly constant whether it's 45 Costcos or 1,300 McDonald's, and
 # whether the video is 15s or 60s. The MIN/MAX are only guard rails.
-LOOKAHEAD_SEC = 1.5            # seconds of road visible ahead; lower = tighter/faster
+LOOKAHEAD_SEC = .5            # seconds of road visible ahead; lower = tighter/faster
 ZOOM_MIN_DEG = 0.30
-ZOOM_MAX_DEG = 6.00
+ZOOM_MAX_DEG = 6
 ZOOM_RESPONSE = 1.0            # >1 exaggerates the tight/wide contrast
 CAMERA_SMOOTH_SEC = 0.75       # gaussian smoothing on the camera path
 WIDE_SHOT_LIFT = 0.20          # pushes the map up in wide shots to clear the stats block
@@ -42,7 +42,7 @@ DRAW_ROADS = True              # Natural Earth 10m roads (slow first render)
 CITY_MIN_POP = 250_000
 
 # ---------------------------------------------------------------- copy
-HOOK_LINES = ["EVERY WHATABURGER", "IN TEXAS"]
+HOOK_LINES = [f"EVERY {PLACE_NAME.upper()}", f"IN {REGION_NAME.upper()}"]
 HOOK_SUB = "one perfect loop"
 REVEAL_LINE = "THE FULL LOOP"
 USE_MILES = True
@@ -74,3 +74,4 @@ ACCENT      = (255, 43, 214)
 SAFE_TOP = 140
 SAFE_BOTTOM = 430              # caption + username strip
 SAFE_RIGHT = 190               # like/comment/share rail
+TEXT_MARGIN = 60               # min gutter each side of headline text

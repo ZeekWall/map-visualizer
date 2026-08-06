@@ -215,6 +215,36 @@ def ring(canvas, x, y, radius, color, width=3, alpha=1.0):
 
 # ----------------------------------------------------------------------- text
 
+def measure(text, f, letter_spacing=0):
+    """Ink width of a string at a given font, including letter spacing."""
+    if not text:
+        return 0.0
+    if letter_spacing == 0:
+        b = f.getbbox(text)
+        return float(b[2] - b[0])
+    return float(sum(f.getlength(ch) for ch in text) + letter_spacing * (len(text) - 1))
+
+
+def fit_size(text, size, max_width, letter_spacing=0, min_size=10):
+    """Shrink a font size until the string fits max_width.
+
+    Long brand names ("EVERY MCDONALD'S") overflow a 1080px frame at the headline
+    size that suits "EVERY COSTCO", so sizes are treated as a ceiling rather than
+    a fixed value. Letter spacing scales with the text so tracking stays even.
+    """
+    if not max_width or not text:
+        return size, letter_spacing
+    w = measure(text, font(size), letter_spacing)
+    if w <= max_width:
+        return size, letter_spacing
+    k = max_width / w
+    new = max(min_size, int(size * k))
+    # integer font sizes round down unpredictably; step until it really fits
+    while new > min_size and measure(text, font(new), letter_spacing * new / size) > max_width:
+        new -= 1
+    return new, letter_spacing * new / size
+
+
 def _render_text_mask(text, f, letter_spacing=0, pad=48):
     """Render text to a tight L mask plus its (w, h) ink box."""
     if letter_spacing == 0:
@@ -238,10 +268,15 @@ def _render_text_mask(text, f, letter_spacing=0, pad=48):
 
 
 def draw_text(canvas, text, size, xy, color, glow_color=None, anchor="mc",
-              glow_sigma=22, glow_gain=0.75, alpha=1.0, letter_spacing=0):
-    """anchor: two chars, horizontal (l/m/r) + vertical (t/m/b)."""
+              glow_sigma=22, glow_gain=0.75, alpha=1.0, letter_spacing=0,
+              max_width=None):
+    """anchor: two chars, horizontal (l/m/r) + vertical (t/m/b).
+
+    size is a ceiling: if max_width is given the text shrinks to fit.
+    """
     if alpha <= 0.003 or not text:
         return
+    size, letter_spacing = fit_size(text, size, max_width, letter_spacing)
     f = font(size)
     pad = int(max(24, glow_sigma * 2.5))
     img, w, h = _render_text_mask(text, f, letter_spacing, pad)
@@ -273,10 +308,17 @@ def _paste_add(canvas, layer, x, y):
 
 
 def draw_odometer(canvas, text, size, xy, color, glow_color, anchor="mc",
-                  glow_sigma=26, glow_gain=0.9, alpha=1.0):
+                  glow_sigma=26, glow_gain=0.9, alpha=1.0, max_width=None):
     """Digits in fixed-width cells so a fast-counting number doesn't jitter."""
     f = font(size)
     cell = max(f.getlength(str(d)) for d in range(10))
+    if max_width:
+        # fixed-width cells make this wider than measure() would suggest
+        w = sum(cell if ch.isdigit() else f.getlength(ch) for ch in text)
+        if w > max_width:
+            size = max(10, int(size * max_width / w))
+            f = font(size)
+            cell = max(f.getlength(str(d)) for d in range(10))
     widths = [cell if ch.isdigit() else f.getlength(ch) for ch in text]
     total = sum(widths)
     box = f.getbbox("0123456789")

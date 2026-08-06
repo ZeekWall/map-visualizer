@@ -211,6 +211,7 @@ def render(lons, lats, cum_dist, cam, basemap_img, meta, cities, out_path):
 
 def _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit):
     CX = C.OUT_W // 2
+    TW = C.OUT_W - 2 * S(C.TEXT_MARGIN)   # usable headline width
 
     if phase == "hook":
         for li, line in enumerate(C.HOOK_LINES):
@@ -220,16 +221,19 @@ def _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit):
             s = 0.82 + 0.18 * gfx.ease_out_back(t)
             gfx.draw_text(canvas, line, S(118) * s, (CX, S(300 + li * 132)),
                           C.TEXT, C.NEON_MID, glow_sigma=S(30), glow_gain=0.9,
-                          alpha=gfx.ease_out_cubic(t), letter_spacing=S(2))
+                          alpha=gfx.ease_out_cubic(t), letter_spacing=S(2),
+                          max_width=TW)
         t = gfx.clamp01((pt - 0.30) / 0.30)
         gfx.draw_text(canvas, C.HOOK_SUB.upper(), S(46), (CX, S(300 + len(C.HOOK_LINES) * 132)),
                       C.TEXT_DIM, C.ACCENT, glow_sigma=S(22), glow_gain=0.5,
-                      alpha=gfx.ease_out_cubic(t), letter_spacing=S(7))
+                      alpha=gfx.ease_out_cubic(t), letter_spacing=S(7),
+                      max_width=TW)
         t = gfx.clamp01((pt - 0.45) / 0.35)
         gfx.panel(canvas, CX - S(340), S(1120), S(680), S(300),
                   alpha=0.55 * gfx.clamp01((pt - 0.45) / 0.35))
         gfx.draw_odometer(canvas, fmt_int(n_stops), S(168), (CX, S(1230)),
-                          C.TEXT, C.NEON_MID, alpha=gfx.ease_out_cubic(t))
+                          C.TEXT, C.NEON_MID, alpha=gfx.ease_out_cubic(t),
+                          max_width=S(640))
         gfx.draw_text(canvas, "STOPS", S(44), (CX, S(1360)), C.TEXT_DIM,
                       alpha=gfx.ease_out_cubic(t), letter_spacing=S(12))
         return
@@ -239,11 +243,11 @@ def _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit):
     if phase in ("whip", "drive"):
         gfx.draw_text(canvas, " ".join(C.HOOK_LINES), S(40), (CX, S(200)),
                       C.TEXT_DIM, C.NEON_MID, glow_sigma=S(18), glow_gain=0.35,
-                      alpha=0.85 * fade, letter_spacing=S(6))
+                      alpha=0.85 * fade, letter_spacing=S(6), max_width=TW)
 
         gfx.panel(canvas, CX - S(400), S(1050), S(800), S(410), alpha=0.5 * fade)
         gfx.draw_odometer(canvas, fmt_int(arc * conv), S(156), (CX, S(1250)),
-                          C.TEXT, C.NEON_MID, alpha=fade)
+                          C.TEXT, C.NEON_MID, alpha=fade, max_width=S(760))
         gfx.draw_text(canvas, f"{unit} DRIVEN", S(42), (CX, S(1372)),
                       C.TEXT_DIM, alpha=0.9 * fade, letter_spacing=S(10))
         gfx.draw_text(canvas, f"STOP {k + 1} / {n_stops}", S(44), (CX, S(1100)),
@@ -258,7 +262,8 @@ def _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit):
     t = gfx.ease_out_cubic(pt / 0.45)
     gfx.panel(canvas, CX - S(430), S(1010), S(860), S(430), alpha=0.62 * t)
     gfx.draw_text(canvas, C.REVEAL_LINE, S(104), (CX, S(300)), C.TEXT, C.NEON_MID,
-                  glow_sigma=S(32), glow_gain=0.95, alpha=t, letter_spacing=S(3))
+                  glow_sigma=S(32), glow_gain=0.95, alpha=t, letter_spacing=S(3),
+                  max_width=TW)
 
     hours = (total_km * conv) / (C.AVG_SPEED_MPH if C.USE_MILES else C.AVG_SPEED_MPH * KM_PER_MI)
     rows = [
