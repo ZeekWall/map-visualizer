@@ -28,6 +28,25 @@ def _cities_path(d):
     return os.path.join(d, "cities.json")
 
 
+def _scan_cities(extent, min_pop):
+    """Populated places inside extent, sorted biggest first."""
+    import cartopy.io.shapereader as shpreader
+
+    W, E, S, N = extent
+    cities = []
+    shp = shpreader.natural_earth(resolution="10m", category="cultural",
+                                  name="populated_places")
+    for rec in shpreader.Reader(shp).records():
+        a = rec.attributes
+        pop = a.get("POP_MAX") or 0
+        x, y = rec.geometry.x, rec.geometry.y
+        if pop >= min_pop and W <= x <= E and S <= y <= N:
+            cities.append({"name": a.get("NAME"), "lon": float(x),
+                           "lat": float(y), "pop": int(pop)})
+    cities.sort(key=lambda c: -c["pop"])
+    return cities
+
+
 def build(force=False):
     d = C.BASEMAP_CACHE
     os.makedirs(d, exist_ok=True)
@@ -36,7 +55,20 @@ def build(force=False):
         with open(_meta_path(d)) as f:
             meta = json.load(f)
         if meta.get("extent") == C.REGION_EXTENT and meta.get("width") == C.BASEMAP_PX_WIDE:
-            progress.done(f"{meta['width']}x{meta['height']} (cached)")
+            if meta.get("city_min_pop") != C.CITY_MIN_POP:
+                # raster is still valid; only the label pool changed, and
+                # rescanning the shapefile is seconds vs. minutes for a
+                # full Cartopy rebuild
+                with progress.spinner("rescanning populated places..."):
+                    cities = _scan_cities(C.REGION_EXTENT, C.CITY_MIN_POP)
+                with open(_cities_path(d), "w") as fh:
+                    json.dump(cities, fh)
+                meta["city_min_pop"] = C.CITY_MIN_POP
+                with open(_meta_path(d), "w") as fh:
+                    json.dump(meta, fh)
+                progress.done(f"{len(cities)} city labels (rescanned)")
+            else:
+                progress.done(f"{meta['width']}x{meta['height']} (cached)")
             return _load(d)
 
     import matplotlib
@@ -44,7 +76,6 @@ def build(force=False):
     import matplotlib.pyplot as plt
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
-    import cartopy.io.shapereader as shpreader
 
     W, E, S, N = C.REGION_EXTENT
     bw = C.BASEMAP_PX_WIDE
@@ -109,23 +140,15 @@ def build(force=False):
     cities = []
     with progress.spinner("scanning populated places..."):
         try:
-            shp = shpreader.natural_earth(resolution="10m", category="cultural",
-                                          name="populated_places")
-            for rec in shpreader.Reader(shp).records():
-                a = rec.attributes
-                pop = a.get("POP_MAX") or 0
-                x, y = rec.geometry.x, rec.geometry.y
-                if pop >= C.CITY_MIN_POP and W <= x <= E and S <= y <= N:
-                    cities.append({"name": a.get("NAME"), "lon": float(x),
-                                   "lat": float(y), "pop": int(pop)})
-            cities.sort(key=lambda c: -c["pop"])
+            cities = _scan_cities(C.REGION_EXTENT, C.CITY_MIN_POP)
         except Exception as e:
             print(f"  skipped city labels: {e}")
 
     with open(_cities_path(d), "w") as fh:
         json.dump(cities, fh)
     with open(_meta_path(d), "w") as fh:
-        json.dump({"extent": C.REGION_EXTENT, "width": bw, "height": bh}, fh)
+        json.dump({"extent": C.REGION_EXTENT, "width": bw, "height": bh,
+                   "city_min_pop": C.CITY_MIN_POP}, fh)
 
     progress.done(f"{bw}x{bh}, {len(cities)} city labels")
     return _load(d)

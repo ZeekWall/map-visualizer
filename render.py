@@ -128,6 +128,17 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
     city_lon = np.array([c["lon"] for c in cities]) if cities else np.zeros(0)
     city_lat = np.array([c["lat"] for c in cities]) if cities else np.zeros(0)
     city_name = [c["name"] for c in cities]
+    city_pop = np.array([c["pop"] for c in cities], float) if cities else np.zeros(0)
+    log_pop = np.log10(np.maximum(city_pop, 1.0))
+
+    # the label population threshold slides log-linearly between the tightest
+    # drive zoom and the wide establishing shot, so towns fade in as the
+    # camera pushes in and drop off again on the wide shots
+    zoom_span = np.log(cam["wide_hw"] / C.ZOOM_MIN_DEG)
+    log_pop_tight = np.log10(C.CITY_LABEL_POP_TIGHT)
+    log_pop_wide = np.log10(C.CITY_LABEL_POP_WIDE)
+    # label size ramps across the same log-population range as the pool itself
+    size_lo, size_hi = np.log10(C.CITY_MIN_POP), np.log10(5e6)
 
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
@@ -232,19 +243,42 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
             canvas *= (1 - lf)
             canvas += pre * lf
 
-        # ---- city labels at constant screen size
+        # ---- city labels: the population threshold slides with zoom, so
+        # small towns fade in as the camera tightens and drop off the wide
+        # shots instead of the old hard 6/14 rank-based snap
         if len(city_lon):
-            keep = 6 if hw > 4 else 14
-            cx, cy = vp.project(city_lon[:keep], city_lat[:keep], box)
-            vis_c = ((cx > -40) & (cx < C.OUT_W + 40) &
-                     (cy > S(240)) & (cy < C.OUT_H - S(C.SAFE_BOTTOM)))
-            if vis_c.any():
-                gfx.flat_dots(canvas, np.c_[cx[vis_c], cy[vis_c]], C.TEXT_DIM,
-                              max(2, int(S(4))), 0.55)
-                for j in np.flatnonzero(vis_c):
-                    gfx.draw_text(canvas, city_name[j].upper(), S(30),
-                                  (cx[j] + S(16), cy[j]), C.TEXT_DIM, anchor="lm",
-                                  alpha=0.6, letter_spacing=S(2))
+            u = gfx.clamp01(np.log(hw / C.ZOOM_MIN_DEG) / zoom_span)
+            thresh = log_pop_tight + u * (log_pop_wide - log_pop_tight)
+            a_city = np.clip((log_pop - thresh) / C.CITY_LABEL_FADE_DECADES, 0, 1)
+            cand = np.flatnonzero(a_city > 0.02)   # already biggest-first
+
+            if len(cand):
+                cx, cy = vp.project(city_lon[cand], city_lat[cand], box)
+                on = ((cx > -40) & (cx < C.OUT_W + 40) &
+                      (cy > S(240)) & (cy < C.OUT_H - S(C.SAFE_BOTTOM)))
+                placed = []
+                for m in np.flatnonzero(on):
+                    if len(placed) >= C.CITY_LABEL_MAX:
+                        break
+                    j = cand[m]
+                    t_sz = gfx.clamp01((log_pop[j] - size_lo) / (size_hi - size_lo))
+                    size = S(C.CITY_LABEL_SIZE_MIN +
+                             t_sz * (C.CITY_LABEL_SIZE_MAX - C.CITY_LABEL_SIZE_MIN))
+                    label = city_name[j].upper()
+                    # measure() returns ink WIDTH only; caps-only labels are
+                    # about `size` tall, close enough for collision boxes
+                    w = gfx.measure(label, gfx.font(size), S(2))
+                    bx, by = cx[m] + S(16), cy[m] - size / 2
+                    if any(bx < px + pw and bx + w > px and
+                           by < py + ph and by + size > py
+                           for px, py, pw, ph in placed):
+                        continue                # a bigger city already has this spot
+                    placed.append((bx, by, w, size))
+                    gfx.flat_dots(canvas, np.array([[cx[m], cy[m]]]), C.TEXT_DIM,
+                                  max(2, int(S(4))), 0.55 * a_city[j])
+                    gfx.draw_text(canvas, label, size, (cx[m] + S(16), cy[m]),
+                                  C.TEXT_DIM, anchor="lm", alpha=0.6 * a_city[j],
+                                  letter_spacing=S(2))
 
         canvas *= vignette
 

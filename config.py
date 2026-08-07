@@ -1,9 +1,9 @@
 """All the knobs. Edit this file, re-run main.py."""
 
 # ---------------------------------------------------------------- data source
-PLACE_NAME = "Buc-ee's"          # OSM brand= value
-PLACE_MAIN_TYPE = "shop"       # e.g. "amenity" for fast_food, "shop" for retail
-PLACE_TYPE = "convenience"       # e.g. "fast_food", "wholesale", "supermarket"
+PLACE_NAME = "Chick-fil-A"          # OSM brand= value
+PLACE_MAIN_TYPE = "amenity"       # e.g. "amenity" for fast_food, "shop" for retail
+PLACE_TYPE = "fast_food"       # e.g. "fast_food", "wholesale", "supermarket"
 
 REGION_NAME = "Texas"          # OSM admin_level=4 area name
 REGION_EXTENT = [-106.7, -93.5, 25.5, 36.6]   # west, east, south, north
@@ -40,7 +40,16 @@ DISTANCE_WEIGHT = 0.65         # 1.0 = constant km/s, 0.0 = constant stops/s
 BASEMAP_PX_WIDE = 6000         # one-time render width; higher = crisper zoom-ins
 BASEMAP_CACHE = "cache/basemap"
 DRAW_ROADS = True              # Natural Earth 10m roads (slow first render)
-CITY_MIN_POP = 250_000
+CITY_MIN_POP = 10_000          # label pool floor; only affects what's cached
+
+# City labels fade in/out on a population threshold that slides with zoom.
+# Both ends are anchored in log space, since population and half-width each
+# span orders of magnitude.
+CITY_LABEL_POP_WIDE  = 1_200_000   # threshold at the widest (hook/reveal) shot
+CITY_LABEL_POP_TIGHT = 10_000      # threshold at ZOOM_MIN_DEG
+CITY_LABEL_FADE_DECADES = 0.25     # log10 band a label fades across
+CITY_LABEL_MAX = 14                # hard cap on labels drawn per frame
+CITY_LABEL_SIZE_MIN, CITY_LABEL_SIZE_MAX = 26, 38   # authored px, by population
 
 # ---------------------------------------------------------------- copy
 HOOK_LINES = [f"EVERY {PLACE_NAME.upper()}", f"IN {REGION_NAME.upper()}"]
