@@ -7,6 +7,7 @@ loop as a 1080x1920 neon animation built for TikTok.
 pip install -r requirements.txt
 python main.py --preview      # 540x960 @ 15fps, ~40s, for checking framing
 python main.py                # 1080x1920 @ 30fps, ~5 min
+python main.py --cover-only   # just the cover PNG, no video encode, ~seconds
 ```
 
 Legs are road-routed by default via a self-hosted OSRM instance (see
@@ -14,7 +15,18 @@ Legs are road-routed by default via a self-hosted OSRM instance (see
 `config.py` to fall back to straight great-circle legs and skip the OSRM
 dependency entirely.
 
-Output: `Costco_Texas_tiktok.mp4`, H.264 / yuv420p / +faststart.
+Output lands in `out/<Brand>_<Region>/`, one folder per post:
+
+```
+out/Costco_Texas/
+├─ tiktok.mp4              H.264 / yuv420p / +faststart
+├─ tiktok_cover.png        establishing shot, title + stop count settled
+├─ tiktok_preview.mp4      from --preview
+└─ tiktok_preview_cover.png
+```
+
+`cache/`, `shots/`, `osrm/`, and `out/` are all generated/downloaded and safe to
+delete — everything in them is rebuilt on the next run (network calls aside).
 
 ## Shot structure
 

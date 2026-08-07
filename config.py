@@ -1,9 +1,9 @@
 """All the knobs. Edit this file, re-run main.py."""
 
 # ---------------------------------------------------------------- data source
-PLACE_NAME = "McDonald's"          # OSM brand= value
-PLACE_MAIN_TYPE = "amenity"       # e.g. "amenity" for fast_food, "shop" for retail
-PLACE_TYPE = "fast_food"       # e.g. "fast_food", "wholesale", "supermarket"
+PLACE_NAME = "Buc-ee's"          # OSM brand= value
+PLACE_MAIN_TYPE = "shop"       # e.g. "amenity" for fast_food, "shop" for retail
+PLACE_TYPE = "convenience"       # e.g. "fast_food", "wholesale", "supermarket"
 
 REGION_NAME = "Texas"          # OSM admin_level=4 area name
 REGION_EXTENT = [-106.7, -93.5, 25.5, 36.6]   # west, east, south, north
@@ -15,6 +15,7 @@ DURATION_SEC = 61              # 15 / 30 / 60 all work
 CRF = 18                       # 18 = visually lossless-ish, 20-23 = smaller file
 PRESET = "medium"
 OUT_FILE = None                # None -> "<Place>_<Region>_tiktok.mp4"
+OUT_DIR = "out"                 # rendered posts land in out/<Brand>_<Region>/
 
 # ---------------------------------------------------------------- act timing
 # Fractions of total runtime. Must sum to 1.0.

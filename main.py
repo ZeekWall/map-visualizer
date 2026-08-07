@@ -85,6 +85,24 @@ def assemble_path(coords, tour, refresh_roads=False):
     return lons, lats, cum_dist, stop_vert, stop_dist, total_hours
 
 
+def output_paths(preview):
+    """out/<Brand>_<Region>/tiktok[_preview].{mp4,png} -- one folder per post so
+    the video and its cover stay together. C.OUT_FILE overrides the path."""
+    if C.OUT_FILE:
+        base = re.sub(r"\.mp4$", "", C.OUT_FILE)
+    else:
+        slug = "{}_{}".format(
+            re.sub(r"[^A-Za-z0-9]+", "", C.PLACE_NAME),
+            re.sub(r"[^A-Za-z0-9]+", "", C.REGION_NAME))
+        base = os.path.join(C.OUT_DIR, slug, "tiktok")
+    if preview:
+        base += "_preview"
+    d = os.path.dirname(base)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    return base + ".mp4", base + "_cover.png"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--refresh-places", action="store_true")
@@ -95,6 +113,8 @@ def main():
                     help="540x960 @ 15fps for a fast look")
     ap.add_argument("--quiet", action="store_true",
                     help="disable progress output")
+    ap.add_argument("--cover-only", action="store_true",
+                    help="write just the cover PNG, skip video encode")
     args = ap.parse_args()
 
     if args.quiet:
@@ -122,16 +142,13 @@ def main():
     cam = camera.build(lons, lats, cum_dist, C.REGION_EXTENT, stop_dist)
     progress.done(f"{cam['n']} frames planned")
 
-    out = C.OUT_FILE or "{}_{}_tiktok.mp4".format(
-        re.sub(r"[^A-Za-z0-9]+", "", C.PLACE_NAME),
-        re.sub(r"[^A-Za-z0-9]+", "", C.REGION_NAME))
-    if args.preview:
-        out = out.replace(".mp4", "_preview.mp4")
+    out, cover = output_paths(args.preview)
 
-    progress.step(6, 6, "Render")
+    progress.step(6, 6, "Cover" if args.cover_only else "Render")
     render.render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
-                  cam, img, meta, cities, out)
-    print(f"Done: {os.path.abspath(out)}")
+                  cam, img, meta, cities, out,
+                  cover_path=cover, cover_only=args.cover_only)
+    print(f"Done: {os.path.abspath(cover if args.cover_only else out)}")
 
 
 if __name__ == "__main__":

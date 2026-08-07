@@ -79,7 +79,8 @@ def fmt_money(v):
 
 
 def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
-          cam, basemap_img, meta, cities, out_path):
+          cam, basemap_img, meta, cities, out_path,
+          cover_path=None, cover_only=False):
     """lons/lats/cum_dist are per road-vertex (dense). stop_vert[s] is the
     vertex index of stop s; stop_dist is cum_dist[stop_vert]. When routing is
     disabled every vertex is a stop, so stop_vert == arange(n) and the two
@@ -118,6 +119,12 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
     reveal_start = int(np.argmax(cam["phase"] == "reveal")) if n_frames else 0
     fade_start = max(n_frames - fade_frames, reveal_start)
 
+    # last frame of the hook: the establishing wide shot with the title and
+    # stop count both fully settled (the count is still fading in earlier --
+    # at 3s in it's only ~64% opacity, see the cover-frame plan for the math)
+    hook = cam["phase"] == "hook"
+    cover_idx = int(np.flatnonzero(hook)[-1]) if hook.any() else 0
+
     city_lon = np.array([c["lon"] for c in cities]) if cities else np.zeros(0)
     city_lat = np.array([c["lat"] for c in cities]) if cities else np.zeros(0)
     city_name = [c["name"] for c in cities]
@@ -130,11 +137,14 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
         "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
         "-movflags", "+faststart", out_path,
     ]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    proc = None
+    if not cover_only:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
 
+    frames = [cover_idx] if cover_only else range(n_frames)
     t0 = time.time()
-    bar = progress.bar(n_frames, unit=" frames")
-    for i in range(n_frames):
+    bar = progress.bar(len(frames), unit=" frames")
+    for n_done, i in enumerate(frames, 1):
         clon, clat, hw = cam["lon"][i], cam["lat"][i], cam["hw"][i]
         phase, pt, arc = cam["phase"][i], cam["ptime"][i], cam["arc"][i]
         box = vp.bounds(clon, clat, hw)
@@ -241,12 +251,19 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
         _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit, total_hours,
             fade=1.0 - lf)
 
-        proc.stdin.write(np.clip(canvas, 0, 255).astype(np.uint8).tobytes())
-        bar.update(i + 1)
+        out_u8 = np.clip(canvas, 0, 255).astype(np.uint8)
+        if cover_path and i == cover_idx:
+            cv2.imwrite(cover_path, cv2.cvtColor(out_u8, cv2.COLOR_RGB2BGR))
+        if proc is not None:
+            proc.stdin.write(out_u8.tobytes())
+        bar.update(n_done)
 
-    proc.stdin.close()
-    proc.wait()
-    progress.done(f"wrote {out_path} ({time.time() - t0:.0f}s)")
+    if proc is not None:
+        proc.stdin.close()
+        proc.wait()
+        progress.done(f"wrote {out_path} ({time.time() - t0:.0f}s)")
+    if cover_path:
+        progress.done(f"wrote {cover_path}")
 
 
 def _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit, total_hours=None,
