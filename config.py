@@ -47,6 +47,7 @@ HOOK_SUB = "one perfect loop"
 REVEAL_LINE = "THE FULL LOOP"
 USE_MILES = True
 AVG_SPEED_MPH = 62             # for the "hours of driving" payoff stat
+GAS_COST_PER_MILE = 0.18       # blended "typical car" estimate; edit to taste
 
 # ---------------------------------------------------------------- solver
 SOLVER_TIME_BUDGET = 45        # seconds for 2-opt / Or-opt improvement
@@ -87,7 +88,7 @@ TEXT_DIM    = (150, 170, 205)
 ACCENT      = (255, 43, 214)
 
 # TikTok UI safe zones (px). Nothing important goes here.
-SAFE_TOP = 140
+SAFE_TOP = 180
 SAFE_BOTTOM = 430              # caption + username strip
 SAFE_RIGHT = 190               # like/comment/share rail
 TEXT_MARGIN = 60               # min gutter each side of headline text

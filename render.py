@@ -74,6 +74,10 @@ def fmt_int(v):
     return f"{int(round(v)):,}"
 
 
+def fmt_money(v):
+    return f"${int(round(v)):,}"
+
+
 def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
           cam, basemap_img, meta, cities, out_path):
     """lons/lats/cum_dist are per road-vertex (dense). stop_vert[s] is the
@@ -283,26 +287,40 @@ def _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit, total_hours=N
     fade = gfx.clamp01(pt / 0.25) if phase == "whip" else 1.0
 
     if phase in ("whip", "drive"):
-        gfx.draw_text(canvas, " ".join(C.HOOK_LINES), S(40), (CX, S(200)),
+        # SAFE_TOP clears TikTok's top nav bar; the text's own glow bleeds
+        # upward past its anchor, so add margin beyond the boundary itself
+        gfx.draw_text(canvas, " ".join(C.HOOK_LINES), S(40), (CX, S(C.SAFE_TOP) + S(90)),
                       C.TEXT_DIM, C.NEON_MID, glow_sigma=S(18), glow_gain=0.35,
                       alpha=0.85 * fade, letter_spacing=S(6), max_width=TW)
 
-        gfx.panel(canvas, CX - S(400), S(1050), S(800), S(410), alpha=0.5 * fade)
-        gfx.draw_odometer(canvas, fmt_int(arc * conv), S(156), (CX, S(1250)),
-                          C.TEXT, C.NEON_MID, alpha=fade, max_width=S(760))
-        gfx.draw_text(canvas, f"{unit} DRIVEN", S(42), (CX, S(1372)),
-                      C.TEXT_DIM, alpha=0.9 * fade, letter_spacing=S(10))
-        gfx.draw_text(canvas, f"STOP {k + 1} / {n_stops}", S(44), (CX, S(1100)),
+        # shifted down from the panel's original y=1050 so it sits just above
+        # the real username/caption line instead of blocking the route --
+        # SAFE_BOTTOM's 430px reservation is conservative; the actual TikTok
+        # caption text only occupies the bottom ~120-160px of that zone.
+        gfx.panel(canvas, CX - S(400), S(1210), S(800), S(410), alpha=0.5 * fade)
+        gfx.draw_text(canvas, f"STOP {k + 1} / {n_stops}", S(44), (CX, S(1260)),
                       C.TEXT, C.ACCENT, glow_sigma=S(20), glow_gain=0.55,
                       alpha=fade, letter_spacing=S(4))
-        gfx.progress_bar(canvas, CX - S(350), S(1442), S(700), S(10),
+
+        # two co-equal columns: mileage and gas cost, ticking up together.
+        # cost is always priced off true miles, independent of USE_MILES.
+        gas_cost = (arc / KM_PER_MI) * C.GAS_COST_PER_MILE
+        gfx.draw_odometer(canvas, fmt_int(arc * conv), S(108), (CX - S(210), S(1410)),
+                          C.TEXT, C.NEON_MID, alpha=fade, max_width=S(340))
+        gfx.draw_text(canvas, f"{unit} DRIVEN", S(32), (CX - S(210), S(1505)),
+                      C.TEXT_DIM, alpha=0.9 * fade, letter_spacing=S(6))
+        gfx.draw_odometer(canvas, fmt_money(gas_cost), S(108), (CX + S(210), S(1410)),
+                          C.TEXT, C.NEON_MID, alpha=fade, max_width=S(340))
+        gfx.draw_text(canvas, "GAS SO FAR", S(32), (CX + S(210), S(1505)),
+                      C.TEXT_DIM, alpha=0.9 * fade, letter_spacing=S(6))
+        gfx.progress_bar(canvas, CX - S(350), S(1602), S(700), S(10),
                          arc / max(total_km, 1e-9), C.NEON_MID, C.NEON_OUTER,
                          alpha=fade)
         return
 
     # ---- reveal
     t = gfx.ease_out_cubic(pt / 0.45) * loop_fade
-    gfx.panel(canvas, CX - S(430), S(1010), S(860), S(430), alpha=0.62 * t)
+    gfx.panel(canvas, CX - S(430), S(1010), S(860), S(460), alpha=0.62 * t)
     gfx.draw_text(canvas, C.REVEAL_LINE, S(104), (CX, S(300)), C.TEXT, C.NEON_MID,
                   glow_sigma=S(32), glow_gain=0.95, alpha=t, letter_spacing=S(3),
                   max_width=TW)
@@ -313,15 +331,17 @@ def _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit, total_hours=N
     else:
         # fallback: constant-speed estimate against whatever distance we have
         hours = (total_km * conv) / (C.AVG_SPEED_MPH if C.USE_MILES else C.AVG_SPEED_MPH * KM_PER_MI)
+    gas_cost_total = (total_km / KM_PER_MI) * C.GAS_COST_PER_MILE
     rows = [
         (fmt_int(total_km * conv), f"{unit} TOTAL"),
         (fmt_int(n_stops), "STOPS HIT"),
         (fmt_int(hours), "HOURS DRIVING"),
+        (fmt_money(gas_cost_total), "IN GAS"),
     ]
     for ri, (val, lab) in enumerate(rows):
-        tt = gfx.ease_out_cubic(gfx.clamp01((pt - 0.18 - 0.11 * ri) / 0.28)) * loop_fade
-        y = S(1090 + ri * 140)
-        gfx.draw_odometer(canvas, val, S(96), (CX - S(30), y + S(26) * (1 - tt)),
+        tt = gfx.ease_out_cubic(gfx.clamp01((pt - 0.18 - 0.09 * ri) / 0.24)) * loop_fade
+        y = S(1090 + ri * 112)
+        gfx.draw_odometer(canvas, val, S(82), (CX - S(30), y + S(22) * (1 - tt)),
                           C.TEXT, C.NEON_MID, anchor="rm", alpha=tt)
-        gfx.draw_text(canvas, lab, S(36), (CX + S(10), y + S(26) * (1 - tt)),
+        gfx.draw_text(canvas, lab, S(30), (CX + S(10), y + S(22) * (1 - tt)),
                       C.TEXT_DIM, anchor="lm", alpha=0.9 * tt, letter_spacing=S(4))
