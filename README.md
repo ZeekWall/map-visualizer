@@ -42,6 +42,8 @@ Change the split with `ACT_*` in `config.py` — they must sum to 1.0.
 ## Files
 
 - `config.py` — every knob. Brand, region, colours, timing, copy.
+- `places.py` — dispatches to All The Places (preferred) or Overpass (fallback).
+- `atpapi.py` — All The Places fetch, cached per spider/region/run.
 - `overpassapi.py` — Overpass fetch, cached per query.
 - `route.py` — haversine matrix, nearest-neighbour seed, 2-opt + Or-opt. Still
   solves stop *order* on great-circle distance — only the drawn geometry and
@@ -126,19 +128,65 @@ Falls back through Anton → Bebas Neue → Inter Black → Poppins Bold → Dej
 Drop `Anton-Regular.ttf` into `./fonts/` for the condensed look most of these
 videos use — Poppins is rounder and reads softer at large sizes.
 
+## Data source
+
+Brand POIs come from **All The Places** (alltheplaces.xyz) when a spider is
+configured, falling back to Overpass/OSM otherwise (`PLACE_SOURCE = "auto"` in
+`config.py`, set to `"atp"` or `"osm"` to force one). ATP scrapes ~4,950
+brands' own store-locator APIs weekly and republishes as CC0 GeoJSON — no
+attribution required, and since it doesn't go through OSM's community tagging
+it doesn't inherit OSM's inconsistent `brand=` values. That inconsistency is
+exactly what `PLACE_QUERY_CLAUSES` below works around for OSM, and why viewer
+reports of missing locations mostly go away once a spider covers the brand.
+Measured against this repo's cached Overpass results for Texas:
+
+| brand | OSM | ATP | delta |
+|---|---:|---:|---:|
+| H-E-B | 343 | 345 | +2 (already hand-tuned via `PLACE_QUERY_CLAUSES`) |
+| Whataburger | 730 | 773 | +43 |
+| Chick-fil-A | 448 | 522 | +74 |
+| McDonald's | 1147 | 1260 | +113 |
+
+To use ATP for a brand, find its spider filename (minus `.py`) under
+`locations/spiders/` in [github.com/alltheplaces/alltheplaces](https://github.com/alltheplaces/alltheplaces)
+and set `ATP_SPIDER` in `config.py`. `ATP_BRANDS` filters co-located
+sub-brands a spider may also emit (e.g. `h_e_b_us` also returns
+`"H-E-B Pharmacy"` rows); `ATP_INCLUDE_INSTORE` controls whether
+licensed/in-store locations count (e.g. a Starbucks counter inside a Target —
+944 standalone vs 1471 including those, in Texas). Leave `ATP_SPIDER = None`
+to always use Overpass.
+
+Attribution still applies: Natural Earth (public domain) backs the basemap
+and OSRM/OSM backs road routing, so `© OpenStreetMap contributors` belongs in
+the video description regardless of which source supplies the POIs.
+
 ## Retargeting
 
 Edit `config.py`:
 
 ```python
 PLACE_NAME, PLACE_MAIN_TYPE, PLACE_TYPE = "McDonald's", "amenity", "fast_food"
+PLACE_QUERY_CLAUSES = None     # reset unless the new brand also needs a union query
+ATP_SPIDER    = "mcdonalds"    # None -> always use Overpass instead
+ATP_BRANDS    = None
 REGION_NAME   = "California"
+REGION_STATE  = "CA"
 REGION_EXTENT = [-124.5, -114.1, 32.5, 42.1]
 HOOK_LINES    = ["EVERY MCDONALD'S", "IN CALIFORNIA"]
 ```
 
-Then `python main.py --rebuild-basemap`. Overpass rate-limits, so the first fetch
-for a new brand may need a retry; results are cached after that.
+Then `python main.py --rebuild-basemap`. Overpass rate-limits, so the first
+Overpass fetch for a new brand may need a retry; results are cached after
+that either way.
+
+`PLACE_QUERY_CLAUSES` overrides Overpass's default single brand/type match
+with a union of raw `nwr[...]` statements — for brands like H-E-B whose OSM
+stores span multiple `brand=` values or include untagged locations (see the
+block above `REGION_NAME` in `config.py`). It's Overpass-only and has no
+effect when `ATP_SPIDER` is set and resolves data. Leave it `None` for the
+common single-brand case, and remember to reset both it and `ATP_SPIDER` when
+retargeting away from a brand that set them, or the new brand will silently
+inherit the old query/spider.
 
 ## Known trade-offs
 

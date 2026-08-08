@@ -2,8 +2,8 @@
 
 The old plotter called ax.set_extent() inside the animation callback, which makes
 Cartopy reproject every feature on every frame. Here Cartopy runs a single time at
-~6000px wide; the animation then just crops and scales that raster, which is a
-cv2.resize instead of a full geospatial redraw.
+BASEMAP_PX_WIDE (scaled to the output resolution); the animation then just crops
+and scales that raster, which is a cv2.resize instead of a full geospatial redraw.
 """
 
 import json
@@ -16,12 +16,12 @@ import config as C
 import progress
 
 
-def _meta_path(d):
-    return os.path.join(d, "basemap.json")
+def _meta_path(d, bw):
+    return os.path.join(d, f"basemap_{bw}.json")
 
 
-def _png_path(d):
-    return os.path.join(d, "basemap.png")
+def _png_path(d, bw):
+    return os.path.join(d, f"basemap_{bw}.png")
 
 
 def _cities_path(d):
@@ -51,10 +51,16 @@ def build(force=False):
     d = C.BASEMAP_CACHE
     os.makedirs(d, exist_ok=True)
 
-    if os.path.exists(_meta_path(d)) and not force:
-        with open(_meta_path(d)) as f:
+    # BASEMAP_PX_WIDE is authored per 1080p of output width; scale it with
+    # OUT_W so a 1440/2160 render gets a correspondingly sharper raster
+    # instead of just upscaling the same 6000px source further. Cached per
+    # width so switching --res doesn't force a rebuild every time.
+    bw = int(round(C.BASEMAP_PX_WIDE * C.OUT_W / 1080))
+
+    if os.path.exists(_meta_path(d, bw)) and not force:
+        with open(_meta_path(d, bw)) as f:
             meta = json.load(f)
-        if meta.get("extent") == C.REGION_EXTENT and meta.get("width") == C.BASEMAP_PX_WIDE:
+        if meta.get("extent") == C.REGION_EXTENT and meta.get("width") == bw:
             if meta.get("city_min_pop") != C.CITY_MIN_POP:
                 # raster is still valid; only the label pool changed, and
                 # rescanning the shapefile is seconds vs. minutes for a
@@ -64,12 +70,12 @@ def build(force=False):
                 with open(_cities_path(d), "w") as fh:
                     json.dump(cities, fh)
                 meta["city_min_pop"] = C.CITY_MIN_POP
-                with open(_meta_path(d), "w") as fh:
+                with open(_meta_path(d, bw), "w") as fh:
                     json.dump(meta, fh)
                 progress.done(f"{len(cities)} city labels (rescanned)")
             else:
                 progress.done(f"{meta['width']}x{meta['height']} (cached)")
-            return _load(d)
+            return _load(d, bw)
 
     import matplotlib
     matplotlib.use("Agg")
@@ -78,7 +84,6 @@ def build(force=False):
     import cartopy.feature as cfeature
 
     W, E, S, N = C.REGION_EXTENT
-    bw = C.BASEMAP_PX_WIDE
     bh = int(round(bw * (N - S) / (E - W)))
 
     dpi = 100
@@ -132,7 +137,7 @@ def build(force=False):
         plt.close(fig)
 
     with progress.spinner("saving raster..."):
-        Image.fromarray(img).save(_png_path(d), optimize=False)
+        Image.fromarray(img).save(_png_path(d, bw), optimize=False)
 
     # City labels are drawn per-frame at constant screen size, so they only need
     # coordinates here -- baking the text into the raster would make labels scale
@@ -146,18 +151,18 @@ def build(force=False):
 
     with open(_cities_path(d), "w") as fh:
         json.dump(cities, fh)
-    with open(_meta_path(d), "w") as fh:
+    with open(_meta_path(d, bw), "w") as fh:
         json.dump({"extent": C.REGION_EXTENT, "width": bw, "height": bh,
                    "city_min_pop": C.CITY_MIN_POP}, fh)
 
     progress.done(f"{bw}x{bh}, {len(cities)} city labels")
-    return _load(d)
+    return _load(d, bw)
 
 
-def _load(d):
-    with open(_meta_path(d)) as f:
+def _load(d, bw):
+    with open(_meta_path(d, bw)) as f:
         meta = json.load(f)
-    img = np.asarray(Image.open(_png_path(d)).convert("RGB"))
+    img = np.asarray(Image.open(_png_path(d, bw)).convert("RGB"))
     cities = []
     if os.path.exists(_cities_path(d)):
         with open(_cities_path(d)) as f:

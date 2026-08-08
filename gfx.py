@@ -71,10 +71,15 @@ def tint(mask, color, gain=1.0):
     return mask[..., None] * (np.array(color, np.float32) * gain)
 
 
-def bloom(mask_u8, sigma):
-    """Blur an L mask and return float32 0..1."""
-    b = cv2.GaussianBlur(mask_u8, (0, 0), sigma, borderType=cv2.BORDER_REPLICATE)
-    return b.astype(np.float32) / 255.0
+def bloom(mask, sigma):
+    """Blur an L mask (uint8 0..255 or float32 0..1) and return float32 0..1.
+    Blurring stays in float32 -- blurring a uint8 mask quantizes a wide-sigma
+    halo to 1/255 steps before it's even tinted, which shows up as concentric
+    banding rings around every glow (exactly what the output dither exists to
+    hide, so it's cheaper to just not introduce it here)."""
+    if mask.dtype == np.uint8:
+        mask = mask.astype(np.float32) / 255.0
+    return cv2.GaussianBlur(mask, (0, 0), sigma, borderType=cv2.BORDER_REPLICATE)
 
 
 # ----------------------------------------------------------------- neon lines
@@ -94,8 +99,58 @@ def _bbox(pts, pad, W, H):
     return x0, y0, x1, y1
 
 
+# fixed-point precision for sub-pixel cv2 drawing (1/16 px). Without this,
+# cv2.polylines/circle snap every point to a whole pixel with plain int32
+# coords, which (a) truncates asymmetrically around 0, jittering the route
+# and every dot by up to a pixel as the camera pans, and (b) forces stroke
+# widths to whole pixels, which visibly steps the entire loop's thickness a
+# handful of times during the whip/reveal as the zoom-driven width changes.
+_FX_SHIFT = 4
+_FX_MUL = 1 << _FX_SHIFT
+
+
+def _fx(pts):
+    return (np.asarray(pts, np.float32) * _FX_MUL).astype(np.int32)
+
+
+def _stroke_mask(shape, pts, width):
+    """Float32 0..1 open-polyline mask with fractional line width, built by
+    blending the floor/ceil integer-width strokes -- cv2 has no fractional
+    thickness, so a width that continuously changes frame to frame (zoom-driven)
+    would otherwise step by whole pixels."""
+    w0 = max(1, int(np.floor(width)))
+    frac = width - w0
+    pf = [_fx(pts)]
+    buf0 = np.zeros(shape, np.uint8)
+    cv2.polylines(buf0, pf, False, 255, w0, cv2.LINE_AA, shift=_FX_SHIFT)
+    if frac < 1e-3:
+        return buf0.astype(np.float32) / 255.0
+    buf1 = np.zeros(shape, np.uint8)
+    cv2.polylines(buf1, pf, False, 255, w0 + 1, cv2.LINE_AA, shift=_FX_SHIFT)
+    return (buf0.astype(np.float32) * (1 - frac) + buf1.astype(np.float32) * frac) / 255.0
+
+
+def _dot_mask(shape, pts, radius):
+    """Float32 0..1 filled-circle mask with fractional radius; see _stroke_mask."""
+    r0 = max(1, int(np.floor(radius)))
+    frac = radius - r0
+    pf = _fx(pts)
+    buf0 = np.zeros(shape, np.uint8)
+    for x, y in pf:
+        cv2.circle(buf0, (int(x), int(y)), r0 * _FX_MUL, 255, -1, cv2.LINE_AA, shift=_FX_SHIFT)
+    if frac < 1e-3:
+        return buf0.astype(np.float32) / 255.0
+    buf1 = np.zeros(shape, np.uint8)
+    for x, y in pf:
+        cv2.circle(buf1, (int(x), int(y)), (r0 + 1) * _FX_MUL, 255, -1, cv2.LINE_AA, shift=_FX_SHIFT)
+    return (buf0.astype(np.float32) * (1 - frac) + buf1.astype(np.float32) * frac) / 255.0
+
+
 def neon_polyline(canvas, pts, core_color, mid_color, outer_color,
-                  core_w=4, mid_w=7, intensity=1.0):
+                  core_w=4, mid_w=7, intensity=1.0, glow_boost=1.0):
+    """glow_boost multiplies only the bloom layers, leaving the core line on
+    plain `intensity` -- lets a caller swell the glow (e.g. a breathing hook)
+    without the core line itself changing brightness. Defaults to a no-op."""
     if len(pts) < 2:
         return
     H, W = canvas.shape[:2]
@@ -106,20 +161,23 @@ def neon_polyline(canvas, pts, core_color, mid_color, outer_color,
     rw, rh = x1 - x0, y1 - y0
     p = (np.asarray(pts, np.float32) - [x0, y0])
 
-    s = 2  # glow is authored at half res; the blur hides the resample
+    # glow is authored at half res at 1080p; s grows with _scale so the
+    # downsample cost stays flat above 1080p instead of the glow buffer
+    # growing 4x at 4K for no visual gain -- the blur hides the resample
+    # either way. The 26/9/3 sigmas are raw 1080p-authored pixels (unlike
+    # core_w/mid_w, which callers already scale), so they're scaled up to
+    # the current resolution before being brought back into buffer space.
+    s = max(2, int(round(2 * _scale)))
     h2, w2 = max(2, rh // s), max(2, rw // s)
-    m = np.zeros((h2, w2), np.uint8)
-    cv2.polylines(m, [(p / s).astype(np.int32)], False, 255,
-                  max(1, int(mid_w) // s), cv2.LINE_AA)
+    m = _stroke_mask((h2, w2), p / s, max(1.0, mid_w / s))
 
-    glow = tint(bloom(m, 26 / s), outer_color, 0.55 * intensity)
-    glow += tint(bloom(m, 9 / s), mid_color, 0.80 * intensity)
-    glow += tint(bloom(m, 3 / s), mid_color, 0.55 * intensity)
+    glow = tint(bloom(m, 26 * _scale / s), outer_color, 0.55 * intensity * glow_boost)
+    glow += tint(bloom(m, 9 * _scale / s), mid_color, 0.80 * intensity * glow_boost)
+    glow += tint(bloom(m, 3 * _scale / s), mid_color, 0.55 * intensity * glow_boost)
     glow = cv2.resize(glow, (rw, rh), interpolation=cv2.INTER_LINEAR)
 
-    core = np.zeros((rh, rw), np.uint8)
-    cv2.polylines(core, [p.astype(np.int32)], False, 255, int(max(1, core_w)), cv2.LINE_AA)
-    glow += tint(core.astype(np.float32) / 255.0, core_color, intensity)
+    core = _stroke_mask((rh, rw), p, max(1.0, core_w))
+    glow += tint(core, core_color, intensity)
 
     canvas[y0:y1, x0:x1] += glow
 
@@ -132,10 +190,9 @@ def flat_polyline(canvas, pts, color, width=2, alpha=0.8):
     if roi is None:
         return
     x0, y0, x1, y1 = roi
-    m = np.zeros((y1 - y0, x1 - x0), np.uint8)
-    cv2.polylines(m, [(np.asarray(pts, np.float32) - [x0, y0]).astype(np.int32)],
-                  False, 255, int(max(1, width)), cv2.LINE_AA)
-    canvas[y0:y1, x0:x1] += tint(m.astype(np.float32) / 255.0, color, alpha)
+    m = _stroke_mask((y1 - y0, x1 - x0),
+                     np.asarray(pts, np.float32) - [x0, y0], max(1.0, width))
+    canvas[y0:y1, x0:x1] += tint(m, color, alpha)
 
 
 def neon_dots(canvas, pts, color, radius=5, glow_sigma=10, intensity=1.0):
@@ -149,17 +206,17 @@ def neon_dots(canvas, pts, color, radius=5, glow_sigma=10, intensity=1.0):
     rw, rh = x1 - x0, y1 - y0
     p = (np.asarray(pts, np.float32) - [x0, y0])
 
-    h2, w2 = max(2, rh // 2), max(2, rw // 2)
-    m = np.zeros((h2, w2), np.uint8)
-    for x, y in (p / 2).astype(np.int32):
-        cv2.circle(m, (int(x), int(y)), max(1, int(radius) // 2), 255, -1, cv2.LINE_AA)
-    glow = cv2.resize(tint(bloom(m, glow_sigma / 2), color, 0.9 * intensity),
+    # radius/glow_sigma here are already output-resolution pixels (callers
+    # scale them); only the downsample factor itself needs to track _scale,
+    # so the glow buffer's cost stays flat instead of growing with OUT_W
+    s = max(2, int(round(2 * _scale)))
+    h2, w2 = max(2, rh // s), max(2, rw // s)
+    m = _dot_mask((h2, w2), p / s, max(1.0, radius / s))
+    glow = cv2.resize(tint(bloom(m, glow_sigma / s), color, 0.9 * intensity),
                       (rw, rh), interpolation=cv2.INTER_LINEAR)
 
-    core = np.zeros((rh, rw), np.uint8)
-    for x, y in p.astype(np.int32):
-        cv2.circle(core, (int(x), int(y)), int(max(1, radius)), 255, -1, cv2.LINE_AA)
-    glow += tint(core.astype(np.float32) / 255.0, color, 0.85 * intensity)
+    core = _dot_mask((rh, rw), p, max(1.0, radius))
+    glow += tint(core, color, 0.85 * intensity)
     canvas[y0:y1, x0:x1] += glow
 
 
@@ -171,10 +228,21 @@ def flat_dots(canvas, pts, color, radius=3, alpha=0.8):
     if roi is None:
         return
     x0, y0, x1, y1 = roi
-    m = np.zeros((y1 - y0, x1 - x0), np.uint8)
-    for x, y in (np.asarray(pts, np.float32) - [x0, y0]).astype(np.int32):
-        cv2.circle(m, (int(x), int(y)), int(max(1, radius)), 255, -1, cv2.LINE_AA)
-    canvas[y0:y1, x0:x1] += tint(m.astype(np.float32) / 255.0, color, alpha)
+    m = _dot_mask((y1 - y0, x1 - x0),
+                  np.asarray(pts, np.float32) - [x0, y0], max(1.0, radius))
+    canvas[y0:y1, x0:x1] += tint(m, color, alpha)
+
+
+_scale = 1.0   # set once per render via set_scale(); see neon_polyline/neon_dots
+
+
+def set_scale(scale):
+    """scale = OUT_W / 1080. Keeps glow width/cost proportional to the
+    1080p-authored look at any output resolution -- without this, a plain
+    resolution bump would make the neon glow relatively half as wide at 4K
+    while costing 4x more to compute."""
+    global _scale
+    _scale = scale
 
 
 _sprite_cache = {}
@@ -182,18 +250,25 @@ _sprite_cache = {}
 
 def head_flare(canvas, x, y, color, size=140, intensity=1.0):
     """Hot radial flare at the leading edge of the route."""
-    key = (int(size),)
+    # quantized to keep the sprite-cache key space small (size continuously
+    # varies with zoom + the stop pop, so without this every frame at high
+    # --res would mint a near-unique sprite) and to make the cap below safe
+    size = max(4, int(round(size / 4)) * 4)
+    key = (size,)
     if key not in _sprite_cache:
-        r = max(2, int(size) // 2)
+        if len(_sprite_cache) > 400:
+            # evict before inserting -- clearing *after* the insert wiped the
+            # entry this call had just written, so the lookup right below it
+            # KeyError'd on any run with enough distinct sizes (e.g. --res 2160)
+            _sprite_cache.clear()
+        r = max(2, size // 2)
         yy, xx = np.mgrid[-r:r, -r:r].astype(np.float32)
         d = np.sqrt(xx ** 2 + yy ** 2) / r
         _sprite_cache[key] = np.clip(1 - d, 0, 1) ** 2.6
-        if len(_sprite_cache) > 400:
-            _sprite_cache.clear()
     spr = _sprite_cache[key]
     r = spr.shape[0] // 2
     _paste_add(canvas, spr[..., None] * (np.array(color, np.float32) * intensity),
-               int(x) - r, int(y) - r)
+               int(round(x)) - r, int(round(y)) - r)
 
 
 def ring(canvas, x, y, radius, color, width=3, alpha=1.0):
@@ -205,11 +280,20 @@ def ring(canvas, x, y, radius, color, width=3, alpha=1.0):
     if roi is None:
         return
     x0, y0, x1, y1 = roi
+    cx, cy = _fx([[x - x0, y - y0]])[0]
+    w0 = max(1, int(np.floor(width)))
+    frac = width - w0
     m = np.zeros((y1 - y0, x1 - x0), np.uint8)
-    cv2.circle(m, (int(x - x0), int(y - y0)), int(radius), 255,
-               int(max(1, width)), cv2.LINE_AA)
-    layer = tint(bloom(m, 8), color, 0.7 * alpha)
-    layer += tint(m.astype(np.float32) / 255.0, color, alpha)
+    cv2.circle(m, (int(cx), int(cy)), int(round(radius * _FX_MUL)), 255,
+              w0, cv2.LINE_AA, shift=_FX_SHIFT)
+    m = m.astype(np.float32) / 255.0
+    if frac >= 1e-3:
+        m1 = np.zeros((y1 - y0, x1 - x0), np.uint8)
+        cv2.circle(m1, (int(cx), int(cy)), int(round(radius * _FX_MUL)), 255,
+                  w0 + 1, cv2.LINE_AA, shift=_FX_SHIFT)
+        m = m * (1 - frac) + (m1.astype(np.float32) / 255.0) * frac
+    layer = tint(bloom(m, 8 * _scale), color, 0.7 * alpha)
+    layer += tint(m, color, alpha)
     canvas[y0:y1, x0:x1] += layer
 
 
@@ -365,15 +449,17 @@ def progress_bar(canvas, x, y, w, h, frac, fg, glow, bg=(28, 36, 60), alpha=1.0)
     if fw >= 2:
         m = np.zeros((rh, rw), np.uint8)
         cv2.rectangle(m, (bx, by), (bx + fw, by + int(h)), 255, -1)
-        layer += tint(bloom(m, 16), glow, 0.8 * alpha)
+        layer += tint(bloom(m, 16 * _scale), glow, 0.8 * alpha)
         layer += tint(m.astype(np.float32) / 255.0, fg, alpha)
     canvas[y0:y1, x0:x1] += layer
 
 
-def panel(canvas, x, y, w, h, alpha=0.55, feather=40):
+def panel(canvas, x, y, w, h, alpha=0.55, feather=None):
     """Soft dark plate so HUD text stays legible over a busy map."""
     if alpha <= 0.01:
         return
+    if feather is None:
+        feather = 40 * _scale   # 1080p-authored default; scales with output res
     H, W = canvas.shape[:2]
     roi = _bbox([[x, y], [x + w, y + h]], int(feather * 3), W, H)
     if roi is None:

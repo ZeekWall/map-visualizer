@@ -1,15 +1,52 @@
 """All the knobs. Edit this file, re-run main.py."""
 
 # ---------------------------------------------------------------- data source
-PLACE_NAME = "Chick-fil-A"          # OSM brand= value
-PLACE_MAIN_TYPE = "amenity"       # e.g. "amenity" for fast_food, "shop" for retail
-PLACE_TYPE = "fast_food"       # e.g. "fast_food", "wholesale", "supermarket"
+PLACE_NAME = "H-E-B"          # OSM brand= value
+PLACE_MAIN_TYPE = "shop"       # e.g. "amenity" for fast_food, "shop" for retail
+PLACE_TYPE = "supermarket"       # e.g. "fast_food", "wholesale", "supermarket"
+
+# Most brands use a single exact brand= tag and PLACE_MAIN_TYPE/PLACE_TYPE above
+# is enough. H-E-B's OSM data spans multiple brand= strings ("H-E-B" and
+# "H-E-B plus!"/"H-E-B Plus!") plus a handful of untagged stores, so a plain
+# exact match undercounts (304 vs the ~345 stores a viewer would call "an
+# H-E-B"). Deliberately excludes Central Market, Joe V's Smart Shop, Mi Tienda
+# (H-E-B-owned but distinct consumer brands) and H-E-B Express (convenience
+# format), and stays away from brand=H-E-B fuel/pharmacy/car_wash POIs, which
+# are separate OSM objects co-located at stores already matched below.
+PLACE_QUERY_CLAUSES = [
+    'nwr["shop"="supermarket"]["brand"~"^H-E-B( plus!)?$",i]["name"!~"^Future ",i](area.region);',
+    'nwr["shop"="supermarket"]["name"~"^H-?E-?B$",i][!"brand"](area.region);',
+]  # None to use the default single brand/type match instead
+
+# All The Places (alltheplaces.xyz) scrapes brands' own store-locator APIs
+# weekly and publishes the result as CC0 GeoJSON, so it doesn't inherit OSM's
+# inconsistent brand= tagging -- the reason PLACE_QUERY_CLAUSES above exists
+# at all. "auto" tries ATP first when ATP_SPIDER is set and falls back to
+# Overpass on any failure (no spider, network error, or nothing left after
+# filtering); "atp"/"osm" force one source.
+PLACE_SOURCE = "auto"          # auto | atp | osm
+# Spider filename (minus .py) from github.com/alltheplaces/alltheplaces,
+# locations/spiders/. None -> always use Overpass.
+ATP_SPIDER = "h_e_b_us"
+# Allow-list of ATP `brand` values to keep, e.g. drop co-located
+# "H-E-B Pharmacy" rows the h_e_b_us spider also emits. None -> keep every
+# brand value the spider returns.
+ATP_BRANDS = {"H-E-B", "H-E-B plus!"}
+# Keep locations licensed/hosted inside another store (ownership_type "LS",
+# or a `located_in` value -- e.g. a Starbucks counter inside a Target)? Not
+# every spider tags this; rows missing both fields are always kept.
+ATP_INCLUDE_INSTORE = False
 
 REGION_NAME = "Texas"          # OSM admin_level=4 area name
+REGION_STATE = "TX"            # USPS code; filters All The Places by addr:state
 REGION_EXTENT = [-106.7, -93.5, 25.5, 36.6]   # west, east, south, north
 
 # ---------------------------------------------------------------- video
-OUT_W, OUT_H = 1080, 1920      # 9:16
+# 1440x2560 by default -- above 1080p gives TikTok's re-encoder a cleaner
+# source (this content is near-worst-case for their transcoder: near-black bg,
+# thin neon lines, smooth glow gradients -> banding). --res on the CLI can
+# drop to 1080 or push to 2160 for a slow, maximum-quality master.
+OUT_W, OUT_H = 1440, 2560      # 9:16
 FPS = 30
 DURATION_SEC = 61              # 15 / 30 / 60 all work
 CRF = 18                       # 18 = visually lossless-ish, 20-23 = smaller file
@@ -19,10 +56,19 @@ OUT_DIR = "out"                 # rendered posts land in out/<Brand>_<Region>/
 
 # ---------------------------------------------------------------- act timing
 # Fractions of total runtime. Must sum to 1.0.
-ACT_HOOK = 0.09                # wide shot, dots ignite, hook text slams in
-ACT_WHIP = 0.05                # fast zoom down to the start pin
-ACT_DRIVE = 0.72               # follow-cam along the route
+ACT_HOOK = 0.03                # loop already lit and breathing, copy on screen
+ACT_WHIP = 0.035               # zoom to the start pin while the route un-draws to dim
+ACT_DRIVE = 0.795              # follow-cam along the route
 ACT_REVEAL = 0.14              # pull back out, full loop + final stats
+
+# the whole lit loop breathes during the hook instead of a fast sweep (which
+# read as flicker at the wide shot, not motion) -- CYCLES must be a whole or
+# half-integer so the breath starts AND ends at rest (sin(0) = sin(n*pi) = 0),
+# matching the reveal's resting brightness at both ends of the hook
+HOOK_PULSE_CYCLES = 3.0    # full brighten/dim cycles across the hook
+HOOK_PULSE_GAIN   = 0.45   # peak brightness above rest
+HOOK_PULSE_DIP    = 0.22   # trough below rest (asymmetric: swells more than it dips)
+HOOK_PULSE_BLOOM  = 0.9    # extra glow-only swell at peak, on top of GAIN
 
 # ---------------------------------------------------------------- camera
 # Zoom is derived from how far the camera travels in LOOKAHEAD_SEC, so on-screen
@@ -37,7 +83,7 @@ WIDE_SHOT_LIFT = 0.20          # pushes the map up in wide shots to clear the st
 DISTANCE_WEIGHT = 0.65         # 1.0 = constant km/s, 0.0 = constant stops/s
 
 # ---------------------------------------------------------------- basemap
-BASEMAP_PX_WIDE = 6000         # one-time render width; higher = crisper zoom-ins
+BASEMAP_PX_WIDE = 6000         # per 1080p of OUT_W; scaled up at higher --res
 BASEMAP_CACHE = "cache/basemap"
 DRAW_ROADS = True              # Natural Earth 10m roads (slow first render)
 CITY_MIN_POP = 10_000          # label pool floor; only affects what's cached
@@ -74,6 +120,11 @@ ROAD_BATCH = 50                 # coords per OSRM /route request
 ROAD_SIMPLIFY_DEG = 0.0005      # ~55m; drop vertices closer together than this
 ROUTE_FALLBACK_STRAIGHT = True  # unroutable leg -> straight segment instead of aborting
 TAIL_KM = 35                    # arc-length of the bright neon tail behind the head
+
+# ---------------------------------------------------------------- stop accent
+# Every stop hit fires its own expanding ring, independent of and overlapping
+# with any other still-live ring -- this is lifetime, not a rate limit.
+STOP_RING_SEC = 0.55            # lifetime of one ring, start to full fade
 
 # ---------------------------------------------------------------- loop
 LOOP_SEAMLESS = True   # dissolve the reveal so the last frame matches frame 0

@@ -60,6 +60,21 @@ def done(summary):
         sys.stdout.flush()
 
 
+def warn(msg):
+    """Print a standalone warning line without finalising the current step
+    (unlike done()) -- for a non-fatal hiccup mid-step, e.g. a source
+    falling back to another. Always visible, TTY or not.
+    """
+    if not enabled:
+        return
+    if _TTY:
+        _out(f"  ! {msg}", nl=True)
+        _out(_state["prefix"])
+    else:
+        sys.stdout.write(f"  ! {msg}\n")
+        sys.stdout.flush()
+
+
 class _Spinner:
     def __init__(self, text):
         self.text = text

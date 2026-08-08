@@ -17,33 +17,46 @@ def _slug(s):
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
 
 
-def _cache_path(place_name, main_type, place_type, region):
-    key = f"{place_name}|{main_type}|{place_type}|{region}"
-    h = hashlib.sha1(key.encode()).hexdigest()[:8]
+def _cache_path(place_name, region, query):
+    h = hashlib.sha1(query.encode()).hexdigest()[:8]
     return os.path.join(CACHE_DIR, f"{_slug(place_name)}-{_slug(region)}-{h}.csv")
 
 
-def getPlaces(placeName, placeMainType, placeType, region="Texas", refresh=False):
+def getPlaces(placeName, placeMainType, placeType, region="Texas", refresh=False,
+             queryClauses=None):
     """Fetch every OSM node/way/relation for a brand inside an admin area.
 
-    The cache is keyed on the full query, so switching PLACE_NAME actually
-    refetches instead of silently reusing the previous brand's file.
+    The cache is keyed on the literal query text, so switching PLACE_NAME (or
+    queryClauses) actually refetches instead of silently reusing the previous
+    brand's file.
+
+    queryClauses: optional list of raw Overpass `nwr[...](area.region);`
+    statements to union together, for brands whose stores span multiple OSM
+    brand= values or include untagged locations (e.g. H-E-B / H-E-B plus!).
+    When omitted, falls back to the single exact brand/type match below.
 
     Returns (places, cached).
     """
     os.makedirs(CACHE_DIR, exist_ok=True)
-    path = _cache_path(placeName, placeMainType, placeType, region)
 
-    if os.path.exists(path) and not refresh:
-        with open(path, "r", newline="", encoding="utf-8") as f:
-            return list(csv.DictReader(f, delimiter="\t")), True
+    if queryClauses:
+        body = "(\n    " + "\n    ".join(queryClauses) + "\n    );"
+    else:
+        body = (f'nwr["brand"="{placeName}"]["{placeMainType}"="{placeType}"]'
+                f'["name"!="Future {placeName}"](area.region);')
 
     query = f"""
     [out:csv(::id,::lat,::lon,name,brand)][timeout:180];
     area["name"="{region}"]["boundary"="administrative"]["admin_level"="4"]->.region;
-    nwr["brand"="{placeName}"]["{placeMainType}"="{placeType}"]["name"!="Future {placeName}"](area.region);
+    {body}
     out center;
     """
+
+    path = _cache_path(placeName, region, query)
+
+    if os.path.exists(path) and not refresh:
+        with open(path, "r", newline="", encoding="utf-8") as f:
+            return list(csv.DictReader(f, delimiter="\t")), True
 
     last_err = None
     with progress.spinner("fetching from Overpass...") as sp:

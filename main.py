@@ -11,12 +11,11 @@ import progress
 import render
 import route
 import routing
-from overpassapi import getPlaces
+from places import get_places
 
 
 def load_coords(refresh=False):
-    places, cached = getPlaces(C.PLACE_NAME, C.PLACE_MAIN_TYPE, C.PLACE_TYPE,
-                               C.REGION_NAME, refresh=refresh)
+    places, cached, source = get_places(refresh=refresh)
     pts = []
     for p in places:
         try:
@@ -25,14 +24,19 @@ def load_coords(refresh=False):
             continue
         if np.isfinite(lat) and np.isfinite(lon):
             pts.append((lat, lon))
+    dropped_invalid = len(places) - len(pts)
     coords = np.array(pts)
     if len(coords) < 3:
         raise SystemExit(f"Only {len(coords)} valid locations — nothing to animate.")
     # OSM often has a drive-thru node and a building way for the same store
     _, keep = np.unique(np.round(coords, 4), axis=0, return_index=True)
+    dropped_dupes = len(coords) - len(keep)
     coords = coords[np.sort(keep)]
+    if dropped_invalid or dropped_dupes:
+        progress.warn(f"dropped {dropped_invalid} unparsable + {dropped_dupes} "
+                      f"duplicate rows from {len(places)} fetched")
     tag = " (cached)" if cached else ""
-    progress.done(f"{len(coords)} {C.PLACE_NAME} locations in {C.REGION_NAME}{tag}")
+    progress.done(f"{len(coords)} {C.PLACE_NAME} locations in {C.REGION_NAME}{tag} [{source}]")
     return coords
 
 
@@ -109,6 +113,8 @@ def main():
     ap.add_argument("--refresh-roads", action="store_true")
     ap.add_argument("--rebuild-basemap", action="store_true")
     ap.add_argument("--seconds", type=float, default=None)
+    ap.add_argument("--res", type=int, choices=[1080, 1440, 2160], default=1440,
+                    help="output height class; 2160 is a slow, high-quality master")
     ap.add_argument("--preview", action="store_true",
                     help="540x960 @ 15fps for a fast look")
     ap.add_argument("--quiet", action="store_true",
@@ -122,7 +128,8 @@ def main():
 
     if args.seconds:
         C.DURATION_SEC = args.seconds
-    if args.preview:
+    C.OUT_W, C.OUT_H = args.res, args.res * 16 // 9
+    if args.preview:  # overrides --res: the fast path always stays 540x960
         C.OUT_W, C.OUT_H, C.FPS, C.CRF, C.PRESET = 540, 960, 15, 26, "veryfast"
 
     progress.step(1, 6, "Places")
