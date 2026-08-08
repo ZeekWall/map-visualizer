@@ -7,6 +7,7 @@ import time
 import requests
 
 import progress
+import textnorm
 
 CACHE_DIR = "cache/places"
 INDEX_URL = "https://data.alltheplaces.xyz/runs/latest/info_embed.html"
@@ -58,16 +59,27 @@ def _in_bbox(lat, lon, extent):
     return w <= lon <= e and s <= lat <= n
 
 
-def _fetch_spider_geojson(spider):
+def _fetch_spider_geojson(spider, cancel=None):
     """Download and return the parsed feature list for one spider's latest run.
     Retries like overpassapi.getPlaces: 3 attempts, linear backoff.
+
+    `cancel`, if given, is a threading.Event checked before each attempt (not
+    mid-request -- a single requests.get() can't be interrupted once it's
+    blocking) and once more before the backoff sleep, mirroring
+    main.run_pipeline's between-stages cancel check. Raises
+    RuntimeError("cancelled") when set.
     """
+    def _check_cancel():
+        if cancel is not None and cancel.is_set():
+            raise RuntimeError("cancelled")
+
     run_id = _resolve_run_id()
     url = f"{DATA_HOST}/runs/{run_id}/output/{spider}.geojson"
 
     last_err = None
     with progress.spinner("fetching from All The Places...") as sp:
         for attempt in range(3):
+            _check_cancel()
             try:
                 r = requests.get(
                     url,
@@ -75,6 +87,12 @@ def _fetch_spider_geojson(spider):
                     timeout=180,
                 )
                 if r.status_code == 200:
+                    # See overpassapi.run_query's matching comment -- without
+                    # this, a cancel during the single most common case (the
+                    # first attempt succeeding) was silently ignored, since
+                    # every other _check_cancel() only runs before an
+                    # attempt starts.
+                    _check_cancel()
                     return json.loads(r.text)["features"], run_id
                 last_err = f"ATP {r.status_code}: {r.text[:300]}"
             except (requests.RequestException, json.JSONDecodeError) as e:
@@ -82,7 +100,11 @@ def _fetch_spider_geojson(spider):
             if attempt < 2:
                 wait = 5 * (attempt + 1)
                 sp.text = f"attempt {attempt + 2}/3 in {wait}s (last: {last_err[:60]})"
-                time.sleep(wait)
+                if cancel is not None:
+                    cancel.wait(wait)  # wakes early if cancelled instead of sleeping it out
+                    _check_cancel()
+                else:
+                    time.sleep(wait)
 
     raise RuntimeError(f"All The Places fetch failed after 3 attempts: {last_err}")
 
@@ -119,6 +141,14 @@ def getPlaces(spider, region_state, region_extent, brands=None, include_instore=
 
     features, run_id = _fetch_spider_geojson(spider)
 
+    # Compare on normalized punctuation, not the literal strings -- a
+    # `brand=` value scraped by ATP and one typed/selected into targets.py
+    # (by hand, or via the Explore tab off an OSM search) routinely differ
+    # by a straight vs typographic apostrophe for the exact same brand
+    # ("McDonald's" vs "McDonald's"), and a raw `in` check here would
+    # silently drop every single row instead of matching. See textnorm.py.
+    normalized_brands = {textnorm.normalize(b) for b in brands} if brands is not None else None
+
     rows = []
     for feat in features:
         props = feat.get("properties") or {}
@@ -131,7 +161,7 @@ def getPlaces(spider, region_state, region_extent, brands=None, include_instore=
         lon, lat = coords[0], coords[1]
 
         brand = props.get("brand")
-        if brands is not None and brand not in brands:
+        if normalized_brands is not None and textnorm.normalize(brand or "") not in normalized_brands:
             continue
 
         if region_state and props.get("addr:state") != region_state:

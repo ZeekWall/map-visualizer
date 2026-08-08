@@ -41,10 +41,21 @@ Change the split with `ACT_*` in `config.py` — they must sum to 1.0.
 
 ## Files
 
-- `config.py` — every knob. Brand, region, colours, timing, copy.
+- `config.py` — every knob. `TARGET`/`REGION` pick the brand/state; everything
+  else is timing, camera, basemap, theme.
+- `targets.py` — brand presets (`Target`) and the region bbox lookup. Add a
+  new brand here, not in `config.py` (or use the Explore tab, below).
+- `targets_edit.py` — writes a new `Target()` entry into `targets.py` on
+  behalf of the Explore tab; validates and rolls back on a bad value.
 - `places.py` — dispatches to All The Places (preferred) or Overpass (fallback).
 - `atpapi.py` — All The Places fetch, cached per spider/region/run.
 - `overpassapi.py` — Overpass fetch, cached per query.
+- `explore.py` — brand discovery for the Explore tab: OSM tag/count probes,
+  All The Places spider search, and per-spider probes. Separate from
+  `places.py`/`atpapi.py`/`overpassapi.py`, which only ever fetch for the
+  target already committed to `targets.py`.
+- `textnorm.py` — normalizes apostrophe/quote/dash punctuation variants for
+  brand-matching comparisons (see [Data source](#data-source) below).
 - `route.py` — haversine matrix, nearest-neighbour seed, 2-opt + Or-opt. Still
   solves stop *order* on great-circle distance — only the drawn geometry and
   distance/duration come from roads.
@@ -54,6 +65,41 @@ Change the split with `ACT_*` in `config.py` — they must sum to 1.0.
 - `gfx.py` — neon primitives, text, odometer, easing.
 - `render.py` — frame compositor, pipes raw frames to ffmpeg.
 - `contact_sheet.py` — `python contact_sheet.py out.mp4 1.5 8 20 29` to eyeball frames.
+- `knobs.py` — reads/writes `config.py`'s knobs for the Knobs tab, straight
+  off its AST so the form can't drift from the file it edits.
+- `tui/` — the Textual workbench (`python tui.py`). See below.
+
+## Workbench (TUI)
+
+```
+python tui.py
+```
+
+An optional Textual UI (`textual`/`textual-image` in `requirements.txt`) with
+five tabs:
+
+- **Run** — pick a target/region, render or generate just the cover, with
+  live per-stage progress and a Cancel button.
+- **Explore** — find and test a new brand before committing it to
+  `targets.py`. Type a name and region, hit Search, and it runs one Overpass
+  discovery query (what OSM `amenity`/`shop` type and `brand=` values the
+  real stores carry) plus a ranked search of All The Places' spider names.
+  Select a row to prefill the Add form (osm type, brand list, spider name);
+  optionally hit "Probe selected" to download that one spider's full run and
+  see its actual in-region count, brand breakdown, and how many rows
+  `include_instore=False` would drop. Add target writes the `Target()` entry
+  straight into `targets.py` (backed up and rolled back on a bad value,
+  same pattern as the Knobs tab) — the Run tab's dropdown picks it up
+  immediately, no restart needed. This is the same manual research loop
+  documented in the `heb` entry's comment in `targets.py`, just repeatable
+  from inside the app instead of by hand with Overpass Turbo and a browser
+  tab open to `alltheplaces/alltheplaces`.
+- **Knobs** — every `config.py` "how it looks" knob, editable in place.
+- **Output** — past renders under `out/`.
+- **Cache** — size/count per `cache/` subfolder, with a whole-category purge;
+  select a category to drill into its individual files and purge just one
+  (a single stale Overpass query, say, without wiping every other cached
+  place lookup alongside it).
 
 ## Road routing
 
@@ -72,7 +118,7 @@ scripts/osrm-setup.sh north-america/us/texas
 
 This downloads a Geofabrik `.osm.pbf` extract into `./osrm/`, builds the OSRM
 graph, and serves it on `http://localhost:5000`. The extract must cover
-`REGION_NAME`/`REGION_EXTENT` in `config.py` — switching states means
+`REGION`'s bounds (`config.py`/`targets.py`) — switching states means
 re-running the script against a new extract (see
 [download.geofabrik.de](https://download.geofabrik.de) for available
 regions). Leave OSRM running and just `python main.py` as usual; results are
@@ -130,63 +176,86 @@ videos use — Poppins is rounder and reads softer at large sizes.
 
 ## Data source
 
-Brand POIs come from **All The Places** (alltheplaces.xyz) when a spider is
-configured, falling back to Overpass/OSM otherwise (`PLACE_SOURCE = "auto"` in
+Brand POIs come from **All The Places** (alltheplaces.xyz) when the target has
+a spider, falling back to Overpass/OSM otherwise (`PLACE_SOURCE = "auto"` in
 `config.py`, set to `"atp"` or `"osm"` to force one). ATP scrapes ~4,950
 brands' own store-locator APIs weekly and republishes as CC0 GeoJSON — no
 attribution required, and since it doesn't go through OSM's community tagging
 it doesn't inherit OSM's inconsistent `brand=` values. That inconsistency is
-exactly what `PLACE_QUERY_CLAUSES` below works around for OSM, and why viewer
-reports of missing locations mostly go away once a spider covers the brand.
-Measured against this repo's cached Overpass results for Texas:
+why viewer reports of missing locations mostly go away once a spider covers
+the brand. Measured against this repo's cached Overpass results for Texas:
 
 | brand | OSM | ATP | delta |
 |---|---:|---:|---:|
-| H-E-B | 343 | 345 | +2 (already hand-tuned via `PLACE_QUERY_CLAUSES`) |
+| H-E-B | 343 | 345 | +2 (already hand-tuned via a Target's `osm_clauses`) |
 | Whataburger | 730 | 773 | +43 |
 | Chick-fil-A | 448 | 522 | +74 |
 | McDonald's | 1147 | 1260 | +113 |
 
-To use ATP for a brand, find its spider filename (minus `.py`) under
-`locations/spiders/` in [github.com/alltheplaces/alltheplaces](https://github.com/alltheplaces/alltheplaces)
-and set `ATP_SPIDER` in `config.py`. `ATP_BRANDS` filters co-located
-sub-brands a spider may also emit (e.g. `h_e_b_us` also returns
-`"H-E-B Pharmacy"` rows); `ATP_INCLUDE_INSTORE` controls whether
-licensed/in-store locations count (e.g. a Starbucks counter inside a Target —
-944 standalone vs 1471 including those, in Texas). Leave `ATP_SPIDER = None`
-to always use Overpass.
+Attribution still applies regardless of which source supplies the POIs:
+Natural Earth (public domain) backs the basemap and OSRM/OSM backs road
+routing, so `© OpenStreetMap contributors` belongs in the video description.
 
-Attribution still applies: Natural Earth (public domain) backs the basemap
-and OSRM/OSM backs road routing, so `© OpenStreetMap contributors` belongs in
-the video description regardless of which source supplies the POIs.
+**Punctuation, not just brand=, differs between the two sources too** — a
+straight apostrophe (`'`) vs a typographic one (`'`) in the same real brand
+name ("McDonald's" vs "McDonald's") is enough to make an exact-match filter
+(ATP's `atp_brands` allow-list, an Overpass `brand~"^...$"` regex) silently
+drop every row. `textnorm.py` normalizes apostrophe/quote and dash variants
+before any such comparison — `atpapi.getPlaces`'s brand filter, the Explore
+tab's Overpass discovery query and its brand-tally merging, and the
+`osm_clauses` it generates for you. It doesn't touch what gets *written* to
+`targets.py` or shown on screen, only what counts as a match.
 
 ## Retargeting
 
-Edit `config.py`:
+`config.py` holds two lines that matter:
 
 ```python
-PLACE_NAME, PLACE_MAIN_TYPE, PLACE_TYPE = "McDonald's", "amenity", "fast_food"
-PLACE_QUERY_CLAUSES = None     # reset unless the new brand also needs a union query
-ATP_SPIDER    = "mcdonalds"    # None -> always use Overpass instead
-ATP_BRANDS    = None
-REGION_NAME   = "California"
-REGION_STATE  = "CA"
-REGION_EXTENT = [-124.5, -114.1, 32.5, 42.1]
-HOOK_LINES    = ["EVERY MCDONALD'S", "IN CALIFORNIA"]
+TARGET = "heb"    # key into targets.TARGETS
+REGION = "TX"     # USPS state code
 ```
 
-Then `python main.py --rebuild-basemap`. Overpass rate-limits, so the first
-Overpass fetch for a new brand may need a retry; results are cached after
-that either way.
+or skip the editor entirely:
 
-`PLACE_QUERY_CLAUSES` overrides Overpass's default single brand/type match
-with a union of raw `nwr[...]` statements — for brands like H-E-B whose OSM
-stores span multiple `brand=` values or include untagged locations (see the
-block above `REGION_NAME` in `config.py`). It's Overpass-only and has no
-effect when `ATP_SPIDER` is set and resolves data. Leave it `None` for the
-common single-brand case, and remember to reset both it and `ATP_SPIDER` when
-retargeting away from a brand that set them, or the new brand will silently
-inherit the old query/spider.
+```
+python main.py --target whataburger --region CA
+python main.py --list-targets      # see what's available
+```
+
+Region bounds are looked up automatically from the Natural Earth shapefile
+Cartopy already has on disk (padded by `REGION_PAD_DEG`), so any of the 50
+states + DC works with no setup — `targets.REGIONS` holds hand-tuned
+overrides for the couple of states where the auto box is wrong (Alaska's
+Aleutians cross the antimeridian).
+
+**Adding a brand** means one entry in `targets.py`, not touching `config.py`.
+The Explore tab in the TUI (`python tui.py`, see [Workbench](#workbench-tui)
+above) does the research below for you — count and sample matches, find the
+spider name, write the entry — but by hand it looks like:
+
+```python
+"mcdonalds": Target(name="McDonald's", osm=("amenity", "fast_food"),
+                    atp_spider="mcdonalds"),
+```
+
+Find the spider filename (minus `.py`) under `locations/spiders/` in
+[github.com/alltheplaces/alltheplaces](https://github.com/alltheplaces/alltheplaces);
+leave `atp_spider=None` for a brand ATP doesn't cover (or a non-chain query —
+see `plannedparenthood`/`highschool` in `targets.py`) and it always resolves
+through Overpass. `osm` is the Overpass `(PLACE_MAIN_TYPE, PLACE_TYPE)`
+fallback pair. `atp_brands` filters co-located sub-brands a spider may also
+emit (e.g. `h_e_b_us` also returns `"H-E-B Pharmacy"` rows — see the `heb`
+entry). `include_instore` controls whether licensed/in-store locations count
+(e.g. a Starbucks counter inside a Target — 944 standalone vs 1471 including
+those, in Texas). `osm_clauses` overrides Overpass's default single
+brand/type match with a union of raw `nwr[...]` statements, for brands whose
+OSM stores span multiple `brand=` values or include untagged locations (see
+the `heb` entry) — Overpass-only, ignored when ATP resolves data.
+
+Then `python main.py --target <key> --rebuild-basemap` (only needed the first
+time a new region's extent hasn't been rendered). Overpass rate-limits, so
+the first Overpass fetch for a new brand may need a retry; results are cached
+after that either way.
 
 ## Known trade-offs
 

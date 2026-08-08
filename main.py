@@ -1,6 +1,7 @@
 import argparse
 import os
 import re
+import time
 
 import numpy as np
 
@@ -11,6 +12,7 @@ import progress
 import render
 import route
 import routing
+import targets
 from places import get_places
 
 
@@ -107,14 +109,70 @@ def output_paths(preview):
     return base + ".mp4", base + "_cover.png"
 
 
+def run_pipeline(preview=False, cover_only=False, refresh_places=False,
+                 refresh_roads=False, rebuild_basemap=False, cancel=None):
+    """The 6 stages, driven by whatever config is already in place (TARGET,
+    REGION, OUT_W/OUT_H, DURATION_SEC, ...). Both main() and the TUI call
+    this -- main() only owns argparse and the config mutations that used to
+    live inline here, so the two front-ends can't drift apart.
+
+    `cancel`, if given, is a threading.Event checked between stages and
+    inside the render loop (render.render's own `cancel` param); a cancelled
+    run raises RuntimeError("cancelled") rather than returning a half state.
+
+    Returns (out_path, cover_path) -- cover_path is None unless cover_path
+    was actually written (i.e. never for a mid-render cancel).
+    """
+    def _check_cancel():
+        if cancel is not None and cancel.is_set():
+            raise RuntimeError("cancelled")
+
+    progress.step(1, 6, "Places")
+    coords = load_coords(refresh=refresh_places)
+    _check_cancel()
+
+    progress.step(2, 6, "Route")
+    tour, D, length = route.solve(coords, C.SOLVER_TIME_BUDGET, C.ROUTE_CACHE)
+    _check_cancel()
+
+    progress.step(3, 6, "Roads")
+    lons, lats, cum_dist, stop_vert, stop_dist, total_hours = assemble_path(
+        coords, tour, refresh_roads=refresh_roads)
+    _check_cancel()
+
+    progress.step(4, 6, "Basemap")
+    img, meta, cities = basemap.build(force=rebuild_basemap)
+    _check_cancel()
+
+    progress.step(5, 6, "Camera")
+    cam = camera.build(lons, lats, cum_dist, C.REGION_EXTENT, stop_dist)
+    progress.done(f"{cam['n']} frames planned")
+    _check_cancel()
+
+    out, cover = output_paths(preview)
+
+    progress.step(6, 6, "Cover" if cover_only else "Render")
+    render.render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
+                  cam, img, meta, cities, out,
+                  cover_path=cover, cover_only=cover_only, cancel=cancel)
+
+    return (cover if cover_only else out), cover
+
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--target", choices=sorted(targets.TARGETS),
+                    help=f"brand preset (default: {C.TARGET}); see targets.py")
+    ap.add_argument("--region", help=f"USPS state code (default: {C.REGION})")
+    ap.add_argument("--list-targets", action="store_true",
+                    help="print the brand/region presets and exit")
     ap.add_argument("--refresh-places", action="store_true")
     ap.add_argument("--refresh-roads", action="store_true")
     ap.add_argument("--rebuild-basemap", action="store_true")
     ap.add_argument("--seconds", type=float, default=None)
-    ap.add_argument("--res", type=int, choices=[1080, 1440, 2160], default=1440,
-                    help="output height class; 2160 is a slow, high-quality master")
+    ap.add_argument("--res", type=int, choices=[1080, 1440, 2160], default=None,
+                    help="output height class; 2160 is a slow, high-quality master "
+                        "(default: OUT_W/OUT_H from config.py)")
     ap.add_argument("--preview", action="store_true",
                     help="540x960 @ 15fps for a fast look")
     ap.add_argument("--quiet", action="store_true",
@@ -123,39 +181,32 @@ def main():
                     help="write just the cover PNG, skip video encode")
     args = ap.parse_args()
 
+    if args.list_targets:
+        for key, t in sorted(targets.TARGETS.items()):
+            src = f"atp:{t.atp_spider}" if t.atp_spider else "osm only"
+            print(f"  {key:<20}{t.name:<20}{src}")
+        return
+
     if args.quiet:
         progress.enabled = False
 
-    if args.seconds:
+    if args.target or args.region:
+        C.retarget(args.target, args.region)
+
+    if args.seconds is not None:
         C.DURATION_SEC = args.seconds
-    C.OUT_W, C.OUT_H = args.res, args.res * 16 // 9
+    if args.res is not None:
+        C.OUT_W, C.OUT_H = args.res, args.res * 16 // 9
     if args.preview:  # overrides --res: the fast path always stays 540x960
         C.OUT_W, C.OUT_H, C.FPS, C.CRF, C.PRESET = 540, 960, 15, 26, "veryfast"
 
-    progress.step(1, 6, "Places")
-    coords = load_coords(refresh=args.refresh_places)
-
-    progress.step(2, 6, "Route")
-    tour, D, length = route.solve(coords, C.SOLVER_TIME_BUDGET, C.ROUTE_CACHE)
-
-    progress.step(3, 6, "Roads")
-    lons, lats, cum_dist, stop_vert, stop_dist, total_hours = assemble_path(
-        coords, tour, refresh_roads=args.refresh_roads)
-
-    progress.step(4, 6, "Basemap")
-    img, meta, cities = basemap.build(force=args.rebuild_basemap)
-
-    progress.step(5, 6, "Camera")
-    cam = camera.build(lons, lats, cum_dist, C.REGION_EXTENT, stop_dist)
-    progress.done(f"{cam['n']} frames planned")
-
-    out, cover = output_paths(args.preview)
-
-    progress.step(6, 6, "Cover" if args.cover_only else "Render")
-    render.render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
-                  cam, img, meta, cities, out,
-                  cover_path=cover, cover_only=args.cover_only)
-    print(f"Done: {os.path.abspath(cover if args.cover_only else out)}")
+    t0 = time.time()
+    result, _ = run_pipeline(
+        preview=args.preview, cover_only=args.cover_only,
+        refresh_places=args.refresh_places, refresh_roads=args.refresh_roads,
+        rebuild_basemap=args.rebuild_basemap)
+    elapsed = progress.format_elapsed(time.time() - t0)
+    print(f"Done: {os.path.abspath(result)} ({elapsed})")
 
 
 if __name__ == "__main__":

@@ -106,7 +106,7 @@ def build(force=False):
                 facecolor=f(C.WATER), edgecolor="none", zorder=2,
             )
         except Exception as e:
-            print(f"  skipped {name}: {e}")
+            progress.warn(f"skipped {name}: {e}")
 
     if C.DRAW_ROADS:
         try:
@@ -116,7 +116,7 @@ def build(force=False):
             )
             ax.add_feature(roads, linewidth=bw / 2400, zorder=3)
         except Exception as e:
-            print(f"  skipped roads: {e}")
+            progress.warn(f"skipped roads: {e}")
 
     ax.add_feature(
         cfeature.STATES.with_scale("50m"),
@@ -147,7 +147,7 @@ def build(force=False):
         try:
             cities = _scan_cities(C.REGION_EXTENT, C.CITY_MIN_POP)
         except Exception as e:
-            print(f"  skipped city labels: {e}")
+            progress.warn(f"skipped city labels: {e}")
 
     with open(_cities_path(d), "w") as fh:
         json.dump(cities, fh)

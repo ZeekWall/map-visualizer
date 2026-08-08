@@ -1,46 +1,52 @@
-"""All the knobs. Edit this file, re-run main.py."""
+"""All the knobs. Edit this file, re-run main.py.
 
-# ---------------------------------------------------------------- data source
-PLACE_NAME = "H-E-B"          # OSM brand= value
-PLACE_MAIN_TYPE = "shop"       # e.g. "amenity" for fast_food, "shop" for retail
-PLACE_TYPE = "supermarket"       # e.g. "fast_food", "wholesale", "supermarket"
+Retargeting to a new brand/region is two lines -- TARGET and REGION below.
+Everything under "resolved" is generated from those two by retarget();
+don't hand-edit it, it'll just get overwritten. Add a new brand in
+targets.py, not here. Everything under "how it looks" is unaffected by
+TARGET/REGION and safe to tune freely.
+"""
 
-# Most brands use a single exact brand= tag and PLACE_MAIN_TYPE/PLACE_TYPE above
-# is enough. H-E-B's OSM data spans multiple brand= strings ("H-E-B" and
-# "H-E-B plus!"/"H-E-B Plus!") plus a handful of untagged stores, so a plain
-# exact match undercounts (304 vs the ~345 stores a viewer would call "an
-# H-E-B"). Deliberately excludes Central Market, Joe V's Smart Shop, Mi Tienda
-# (H-E-B-owned but distinct consumer brands) and H-E-B Express (convenience
-# format), and stays away from brand=H-E-B fuel/pharmacy/car_wash POIs, which
-# are separate OSM objects co-located at stores already matched below.
-PLACE_QUERY_CLAUSES = [
-    'nwr["shop"="supermarket"]["brand"~"^H-E-B( plus!)?$",i]["name"!~"^Future ",i](area.region);',
-    'nwr["shop"="supermarket"]["name"~"^H-?E-?B$",i][!"brand"](area.region);',
-]  # None to use the default single brand/type match instead
+import targets
 
-# All The Places (alltheplaces.xyz) scrapes brands' own store-locator APIs
-# weekly and publishes the result as CC0 GeoJSON, so it doesn't inherit OSM's
-# inconsistent brand= tagging -- the reason PLACE_QUERY_CLAUSES above exists
-# at all. "auto" tries ATP first when ATP_SPIDER is set and falls back to
-# Overpass on any failure (no spider, network error, or nothing left after
-# filtering); "atp"/"osm" force one source.
-PLACE_SOURCE = "auto"          # auto | atp | osm
-# Spider filename (minus .py) from github.com/alltheplaces/alltheplaces,
-# locations/spiders/. None -> always use Overpass.
-ATP_SPIDER = "h_e_b_us"
-# Allow-list of ATP `brand` values to keep, e.g. drop co-located
-# "H-E-B Pharmacy" rows the h_e_b_us spider also emits. None -> keep every
-# brand value the spider returns.
-ATP_BRANDS = {"H-E-B", "H-E-B plus!"}
-# Keep locations licensed/hosted inside another store (ownership_type "LS",
-# or a `located_in` value -- e.g. a Starbucks counter inside a Target)? Not
-# every spider tags this; rows missing both fields are always kept.
-ATP_INCLUDE_INSTORE = False
+# ================================================================== target
+TARGET = "heb"                 # key into targets.TARGETS
+REGION = "TX"                  # USPS state code
 
-REGION_NAME = "Texas"          # OSM admin_level=4 area name
-REGION_STATE = "TX"            # USPS code; filters All The Places by addr:state
-REGION_EXTENT = [-106.7, -93.5, 25.5, 36.6]   # west, east, south, north
+PLACE_SOURCE = "auto"          # auto | atp | osm -- see targets.py for what
+                               # "auto" tries first and when it falls back
+REGION_PAD_DEG = 0.3           # padding added to the auto-derived region bbox
 
+
+# ================================================================ resolved
+# Filled in by retarget(); every consumer module reads these names exactly
+# as before. Re-run retarget() (main.py does, after parsing --target/--region)
+# any time TARGET/REGION/PLACE_SOURCE/REGION_PAD_DEG change.
+def retarget(target=None, region=None):
+    global TARGET, REGION, PLACE_NAME, PLACE_MAIN_TYPE, PLACE_TYPE, \
+        PLACE_QUERY_CLAUSES, ATP_SPIDER, ATP_BRANDS, ATP_INCLUDE_INSTORE, \
+        REGION_NAME, REGION_STATE, REGION_EXTENT, HOOK_LINES
+
+    TARGET = target or TARGET
+    REGION = region or REGION
+
+    t = targets.TARGETS[TARGET]
+    PLACE_NAME = t.name
+    PLACE_MAIN_TYPE, PLACE_TYPE = t.osm
+    PLACE_QUERY_CLAUSES = list(t.osm_clauses) if t.osm_clauses else None
+    ATP_SPIDER = t.atp_spider
+    ATP_BRANDS = t.atp_brands
+    ATP_INCLUDE_INSTORE = t.include_instore
+
+    REGION_NAME, REGION_STATE, REGION_EXTENT = targets.resolve_region(REGION, REGION_PAD_DEG)
+
+    HOOK_LINES = [f"EVERY {PLACE_NAME.upper()}", f"IN {REGION_NAME.upper()}"]
+
+
+retarget()
+
+
+# =============================================================== how it looks
 # ---------------------------------------------------------------- video
 # 1440x2560 by default -- above 1080p gives TikTok's re-encoder a cleaner
 # source (this content is near-worst-case for their transcoder: near-black bg,
@@ -98,7 +104,6 @@ CITY_LABEL_MAX = 14                # hard cap on labels drawn per frame
 CITY_LABEL_SIZE_MIN, CITY_LABEL_SIZE_MAX = 26, 38   # authored px, by population
 
 # ---------------------------------------------------------------- copy
-HOOK_LINES = [f"EVERY {PLACE_NAME.upper()}", f"IN {REGION_NAME.upper()}"]
 HOOK_SUB = "one perfect loop"
 REVEAL_LINE = "THE FULL LOOP"
 USE_MILES = True

@@ -1,7 +1,9 @@
 """Frame compositor. Crops the cached basemap for the current camera, paints the
 neon route on top, lays out the HUD, and pipes raw frames straight into ffmpeg."""
 
+import os
 import subprocess
+import threading
 import time
 
 import cv2
@@ -99,11 +101,15 @@ def fmt_money(v):
 
 def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
           cam, basemap_img, meta, cities, out_path,
-          cover_path=None, cover_only=False):
+          cover_path=None, cover_only=False, cancel=None):
     """lons/lats/cum_dist are per road-vertex (dense). stop_vert[s] is the
     vertex index of stop s; stop_dist is cum_dist[stop_vert]. When routing is
     disabled every vertex is a stop, so stop_vert == arange(n) and the two
-    index spaces collapse back to the old behaviour."""
+    index spaces collapse back to the old behaviour.
+
+    `cancel`, if given, is a threading.Event: checked once per frame, and on
+    cancellation the ffmpeg child is killed and the partial output file is
+    removed rather than left as a moov-less, unplayable .mp4."""
     global _S
     _S = C.OUT_W / 1080.0
     gfx.set_scale(_S)
@@ -199,13 +205,33 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
         "-movflags", "+faststart", out_path,
     ]
     proc = None
+    stderr_lines = []
+    stderr_thread = None
     if not cover_only:
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        # ffmpeg's stderr is otherwise uncaptured and would print straight to
+        # whatever owns this process's real stderr (fine for the CLI, but it
+        # would punch through a TUI screen); drain it on its own thread so a
+        # full pipe can never block ffmpeg, and surface anything it said only
+        # if the encode actually fails.
+        def _drain_stderr():
+            for line in proc.stderr:
+                stderr_lines.append(line.decode(errors="replace").rstrip())
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
 
+    cancelled = False
+    normal_completion = False
     frames = [cover_idx] if cover_only else range(n_frames)
     t0 = time.time()
     bar = progress.bar(len(frames), unit=" frames")
-    for n_done, i in enumerate(frames, 1):
+    # `try`/`for` deliberately indented 2 (not 4) so the ~250-line frame body
+    # below needed no re-indentation when cancellation support was added.
+    try:
+      for n_done, i in enumerate(frames, 1):
+        if cancel is not None and cancel.is_set():
+            cancelled = True
+            break
         clon, clat, hw = cam["lon"][i], cam["lat"][i], cam["hw"][i]
         phase, pt, arc = cam["phase"][i], cam["ptime"][i], cam["arc"][i]
         box = vp.bounds(clon, clat, hw)
@@ -457,13 +483,36 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
         if proc is not None:
             proc.stdin.write(out_u8.tobytes())
         bar.update(n_done)
+      normal_completion = True
+    finally:
+        # kill (not close+wait) on cancellation or any exception mid-loop --
+        # otherwise an orphaned ffmpeg keeps running against a stdin that will
+        # never see more data, and a killed process leaves no moov atom, so
+        # the partial file below is explicitly removed rather than kept
+        # around looking like a real (but broken) render.
+        if proc is not None:
+            if cancelled or not normal_completion:
+                proc.kill()
+            else:
+                proc.stdin.close()
+            proc.wait()
+            if stderr_thread:
+                stderr_thread.join(timeout=1.0)
 
     if proc is not None:
-        proc.stdin.close()
-        proc.wait()
-        progress.done(f"wrote {out_path} ({time.time() - t0:.0f}s)")
-    if cover_path:
+        if cancelled:
+            if os.path.exists(out_path):
+                os.remove(out_path)
+            progress.warn(f"render cancelled, removed partial {out_path}")
+        elif proc.returncode != 0:
+            tail = "\n".join(stderr_lines[-20:])
+            raise RuntimeError(f"ffmpeg exited {proc.returncode}: {tail}")
+        else:
+            progress.done(f"wrote {out_path} ({time.time() - t0:.0f}s)")
+    if cover_path and not cancelled:
         progress.done(f"wrote {cover_path}")
+    if cancelled:
+        raise RuntimeError("cancelled")
 
 
 def _hud_rects(phase, CX, TW):

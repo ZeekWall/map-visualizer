@@ -19,16 +19,16 @@ def _via_osm(refresh):
 
 def _via_atp(refresh):
     places, cached = getPlacesATP(
-        C.ATP_SPIDER, getattr(C, "REGION_STATE", None), C.REGION_EXTENT,
-        brands=getattr(C, "ATP_BRANDS", None),
-        include_instore=getattr(C, "ATP_INCLUDE_INSTORE", True),
+        C.ATP_SPIDER, C.REGION_STATE, C.REGION_EXTENT,
+        brands=C.ATP_BRANDS,
+        include_instore=C.ATP_INCLUDE_INSTORE,
         refresh=refresh)
     return places, cached, "atp"
 
 
 def get_places(refresh=False):
     """Returns (places, cached, source) where source is "atp" or "osm"."""
-    source = getattr(C, "PLACE_SOURCE", "auto")
+    source = C.PLACE_SOURCE
 
     if source == "osm":
         return _via_osm(refresh)
@@ -39,7 +39,7 @@ def get_places(refresh=False):
     # auto: try ATP when a spider is configured, fall back to Overpass on any
     # failure -- no spider, a network/HTTP error, or a result that filters
     # down to nothing (the failure mode most likely to ship a broken video).
-    if getattr(C, "ATP_SPIDER", None):
+    if C.ATP_SPIDER:
         try:
             places, cached, src = _via_atp(refresh)
             if places:

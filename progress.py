@@ -23,11 +23,27 @@ import time
 
 enabled = True
 
+# Optional callback: sink(event_dict) -- called on every step/done/warn/bar
+# update (and spinner caption changes) *in addition to* the normal terminal
+# output below, so a caller (e.g. a TUI) can mirror progress into its own
+# widgets without this module knowing anything about it. event["kind"] is
+# one of "step"/"done"/"warn"/"bar". None (default) -- no-op, zero overhead.
+# A TUI should also set _TTY = False before running the pipeline: it silences
+# the ANSI/\r writes below and stops the spinner thread from starting (see
+# _Spinner.__enter__), since a background thread writing to stdout would
+# corrupt a curses/Textual screen.
+sink = None
+
 _TTY = sys.stdout.isatty()
 _SPIN_FRAMES = "|/-\\"
 _REDRAW_SEC = 0.1  # ~10fps cap on redraws, so per-frame/per-move updates don't flood the terminal
 
 _state = {"prefix": "", "start": 0.0}
+
+
+def _emit(event):
+    if sink is not None:
+        sink(event)
 
 
 def _out(s, nl=False):
@@ -44,12 +60,16 @@ def step(i, n, name):
     in between for the slow path."""
     _state["prefix"] = f"[{i}/{n}] {name:<8} "
     _state["start"] = time.time()
+    _state["i"], _state["n"], _state["name"] = i, n, name
     _out(_state["prefix"])
+    _emit({"kind": "step", "i": i, "n": n, "name": name})
 
 
 def done(summary):
     """Finalise the current step's line. Safe to call directly after step()
     with nothing in between (the cache-hit path)."""
+    _emit({"kind": "done", "i": _state.get("i"), "n": _state.get("n"),
+          "name": _state.get("name"), "summary": summary})
     if not enabled:
         return
     line = f"{_state['prefix']}done  {summary}"
@@ -65,6 +85,8 @@ def warn(msg):
     (unlike done()) -- for a non-fatal hiccup mid-step, e.g. a source
     falling back to another. Always visible, TTY or not.
     """
+    _emit({"kind": "warn", "i": _state.get("i"), "n": _state.get("n"),
+          "name": _state.get("name"), "msg": msg})
     if not enabled:
         return
     if _TTY:
@@ -77,9 +99,21 @@ def warn(msg):
 
 class _Spinner:
     def __init__(self, text):
-        self.text = text
+        self._text = text
         self._stop = threading.Event()
         self._thread = None
+        _emit({"kind": "spinner", "i": _state.get("i"), "n": _state.get("n"),
+              "name": _state.get("name"), "text": text})
+
+    @property
+    def text(self):
+        return self._text
+
+    @text.setter
+    def text(self, value):
+        self._text = value
+        _emit({"kind": "spinner", "i": _state.get("i"), "n": _state.get("n"),
+              "name": _state.get("name"), "text": value})
 
     def _run(self):
         for frame in itertools.cycle(_SPIN_FRAMES):
@@ -121,12 +155,15 @@ class Bar:
 
     def update(self, n):
         self.n = n
-        if not (enabled and _TTY):
-            return
         now = time.time()
-        if now - self._last_draw < _REDRAW_SEC and n < self.total:
+        throttled = now - self._last_draw < _REDRAW_SEC and n < self.total
+        if not throttled:
+            self._last_draw = now
+            _emit({"kind": "bar", "i": _state.get("i"), "n_step": _state.get("n"),
+                  "name": _state.get("name"), "n": self.n, "total": self.total,
+                  "unit": self.unit, "elapsed": now - self.t0})
+        if not (enabled and _TTY) or throttled:
             return
-        self._last_draw = now
         self._draw()
 
     def _draw(self):
@@ -144,3 +181,14 @@ class Bar:
 def bar(total, unit=""):
     """Determinate progress bar. Call .update(n) as work completes."""
     return Bar(total, unit)
+
+
+def format_elapsed(seconds):
+    """Render a duration as "42s" or "3m 12s" -- for the pipeline's total
+    wall-clock time in the final Done message (CLI and TUI alike), distinct
+    from the per-stage timings render.py/done() already report inline."""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    m, s = divmod(seconds, 60)
+    return f"{m}m {s}s"
