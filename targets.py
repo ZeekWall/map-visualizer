@@ -110,6 +110,21 @@ TARGETS = {
             ("Second Baptist Church", 29.7572394, -95.4989707),
             ("Woodlands Church", 30.2013449, -95.4732195),
         )),
+    'chipotle': Target(
+        name='Chipotle', osm=('amenity', 'fast_food'),
+        atp_spider='chipotle'),
+    'home_depot': Target(
+        name='Home Depot', osm=('shop', 'doityourself'),
+        atp_spider='home_depot',
+        atp_brands=frozenset({'The Home Depot'}),
+        # OSM tags every real store brand="The Home Depot" (verified live), not
+        # the bare "Home Depot" this target displays -- a plain exact match on
+        # the Overpass fallback path (auto mode's fallback when ATP is slow/
+        # unavailable) matches zero stores. Same class of fix as heb above.
+        osm_clauses=(
+            'nwr["shop"="doityourself"]["brand"~"^(The )?Home Depot$",i]'
+            '["name"!~"^Future ",i](area.region);',
+        )),
 }
 
 # Hand-tuned overrides for states where the auto-derived bbox (see

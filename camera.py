@@ -43,11 +43,12 @@ def build(lons, lats, cum_dist, extent, stop_dist=None):
         stop_dist = cum_dist
 
     total_frames = int(C.FPS * C.DURATION_SEC)
-    act_total = C.ACT_HOOK + C.ACT_WHIP + C.ACT_DRIVE + C.ACT_REVEAL
-    n_hook = int(total_frames * C.ACT_HOOK / act_total)
-    n_whip = int(total_frames * C.ACT_WHIP / act_total)
-    n_reveal = int(total_frames * C.ACT_REVEAL / act_total)
-    n_drive = total_frames - n_hook - n_whip - n_reveal
+    n_hook = min(int(round(C.FPS * C.HOOK_SEC)), total_frames)
+    remaining = total_frames - n_hook
+    act_total = C.ACT_WHIP + C.ACT_DRIVE + C.ACT_REVEAL
+    n_whip = int(remaining * C.ACT_WHIP / act_total)
+    n_reveal = int(remaining * C.ACT_REVEAL / act_total)
+    n_drive = remaining - n_whip - n_reveal
 
     total = cum_dist[-1]
     n_stops = len(stop_dist) - 1

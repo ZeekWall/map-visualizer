@@ -62,11 +62,20 @@ OUT_FILE = None                # None -> "<Place>_<Region>_tiktok.mp4"
 OUT_DIR = "out"                 # rendered posts land in out/<Brand>_<Region>/
 
 # ---------------------------------------------------------------- act timing
-# Fractions of total runtime. Must sum to 1.0.
-ACT_HOOK = 0.03                # loop already lit and breathing, copy on screen
+HOOK_SEC = 1.0                  # fixed seconds the hook holds before whip/drive
+                                 # start, independent of DURATION_SEC -- pins
+                                 # time-to-traversal regardless of video length
+
+# Fractions of the runtime remaining after HOOK_SEC. Must sum to 1.0.
 ACT_WHIP = 0.035               # zoom to the start pin while the route un-draws to dim
 ACT_DRIVE = 0.795              # follow-cam along the route
 ACT_REVEAL = 0.14              # pull back out, full loop + final stats
+
+# breathing pulse during the hook -- off by default (a flat hold reads
+# cleaner and guarantees frame 0 matches the reveal's resting brightness for
+# the seamless loop; see LOOP_SEAMLESS). Kept here, still fully wired, so it
+# can be flipped back on.
+HOOK_PULSE_ENABLED = False
 
 # the whole lit loop breathes during the hook instead of a fast sweep (which
 # read as flicker at the wide shot, not motion) -- CYCLES must be a whole or

@@ -260,7 +260,8 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
         # dim/pending layers in across hook->whip (see the loop-seam note)
         if phase == "hook":
             hook_a = 1.0
-            breath = np.sin(2 * np.pi * C.HOOK_PULSE_CYCLES * pt)
+            breath = (np.sin(2 * np.pi * C.HOOK_PULSE_CYCLES * pt)
+                      if C.HOOK_PULSE_ENABLED else 0.0)
         elif phase == "whip":
             hook_a = 1.0 - gfx.clamp01(pt / 0.40)
             breath = 0.0
@@ -361,17 +362,21 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
 
         # ---- hook/whip overlay: the loop is already fully drawn (it has to
         # match the reveal's end state -- see the loop-seamless notes above),
-        # so the opening can't draw itself on. Instead the whole lit loop
-        # breathes -- brightens and dims together -- for the length of the
-        # hook, then the whole overlay fades out across the first 40% of the
-        # whip so DRIVE's normal per-frame state (nothing travelled yet, all
+        # so the opening can't draw itself on. By default (HOOK_PULSE_ENABLED
+        # = False) the hook just holds flat at rest brightness for its whole
+        # length, which trivially matches frame 0 to the reveal's end state.
+        # If HOOK_PULSE_ENABLED, the whole lit loop instead breathes --
+        # brightens and dims together -- for the length of the hook. Either
+        # way the overlay fades out across the first 40% of the whip so
+        # DRIVE's normal per-frame state (nothing travelled yet, all
         # pending) is what's left underneath.
         #
-        # `breath` is a sine that starts AND ends at 0 across the hook (see
-        # HOOK_PULSE_CYCLES in config.py), so frame 0 and the hook's last
-        # frame both sit at the same resting brightness as the reveal's end
-        # state -- the breathing never pops the seam or the whip handoff.
-        # (hook_a/breath were computed above, before the pending-dot fades.)
+        # When enabled, `breath` is a sine that starts AND ends at 0 across
+        # the hook (see HOOK_PULSE_CYCLES in config.py), so frame 0 and the
+        # hook's last frame both sit at the same resting brightness as the
+        # reveal's end state -- the breathing never pops the seam or the
+        # whip handoff. (hook_a/breath were computed above, before the
+        # pending-dot fades.)
         if hook_a > 0.003:
             core_m = 1.0 + C.HOOK_PULSE_GAIN * max(breath, 0.0) \
                          + C.HOOK_PULSE_DIP * min(breath, 0.0)
