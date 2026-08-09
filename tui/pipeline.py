@@ -29,6 +29,9 @@ import config as C
 import progress
 import main
 
+_DEFAULT_OUT_W, _DEFAULT_OUT_H = C.OUT_W, C.OUT_H
+_DEFAULT_FPS, _DEFAULT_CRF, _DEFAULT_PRESET = C.FPS, C.CRF, C.PRESET
+
 
 @contextmanager
 def progress_muted(on_event):
@@ -77,6 +80,8 @@ def run(on_event, target=None, region=None, preview=False, cover_only=False,
         C.retarget(target, region)
     if duration is not None:
         C.DURATION_SEC = duration
+    C.OUT_W, C.OUT_H = _DEFAULT_OUT_W, _DEFAULT_OUT_H
+    C.FPS, C.CRF, C.PRESET = _DEFAULT_FPS, _DEFAULT_CRF, _DEFAULT_PRESET
     if res is not None:
         C.OUT_W, C.OUT_H = res, res * 16 // 9
     if preview:
