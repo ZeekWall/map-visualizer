@@ -59,6 +59,11 @@ CRF = 18                       # 18 = visually lossless-ish, 20-23 = smaller fil
 PRESET = "medium"
 OUT_FILE = None                # None -> "<Place>_<Region>_tiktok.mp4"
 OUT_DIR = "out"                 # rendered posts land in out/<Brand>_<Region>/
+# Frames are drawn in a fork()'d process pool (Linux/macOS only; render.py
+# falls back to single-process with a warning elsewhere) since each frame is
+# independent of every other -- None -> os.cpu_count(), or cap it on a
+# shared/resource-constrained box. 1 forces the old single-process loop.
+RENDER_WORKERS = None
 
 # ---------------------------------------------------------------- act timing
 # Fractions of total runtime. Must sum to 1.0.

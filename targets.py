@@ -56,8 +56,9 @@ TARGETS = {
     'starbucks': Target(
         name='Starbucks', osm=('amenity', 'cafe'),
         atp_spider='starbucks_us'),
-    "costco": Target(name="Costco", osm=("shop", "wholesale"),
-                     atp_spider="costco_ca_gb_us"),
+    'costco': Target(
+        name='Costco', osm=('shop', 'wholesale'),
+        atp_spider='costco_ca_gb_us'),
     # No ATP spider -> always resolves through Overpass. This is the shape a
     # non-chain/generic query takes (no brand=, just an amenity type).
     "plannedparenthood": Target(name="Planned Parenthood", osm=("amenity", "clinic")),
@@ -69,6 +70,9 @@ TARGETS = {
     'sonic': Target(
         name='Sonic', osm=('amenity', 'fast_food'),
         atp_spider='sonic_drivein_us'),
+    'bassproshops': Target(
+        name='Bass Pro Shops', osm=('shop', 'outdoor'),
+        atp_spider='bass_pro_shops'),
 }
 
 # Hand-tuned overrides for states where the auto-derived bbox (see

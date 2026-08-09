@@ -1,10 +1,12 @@
 """Frame compositor. Crops the cached basemap for the current camera, paints the
 neon route on top, lays out the HUD, and pipes raw frames straight into ffmpeg."""
 
+import multiprocessing as mp
 import os
 import subprocess
 import threading
 import time
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -99,6 +101,332 @@ def fmt_money(v):
     return f"${int(round(v)):,}"
 
 
+# ---------------------------------------------------------------- frame pool
+# Every frame is a pure function of its index + the read-only context built
+# below (cam/vp/vignette/... are all precomputed once, before the loop, and
+# nothing inside a frame mutates shared state except gfx's own memoization
+# caches) -- so frames render independently across a fork()'d process pool
+# instead of one at a time. _worker_ctx is set once per worker by
+# _worker_init and never touched by the parent process.
+_worker_ctx = None
+
+
+def _worker_init(ctx):
+    global _worker_ctx
+    _worker_ctx = ctx
+    gfx.set_scale(ctx.scale)
+    cv2.setNumThreads(1)  # each worker is one of N processes -- letting cv2
+                          # also fan its own ops out to every core oversubscribes
+    np.random.seed()      # reseed off OS entropy: forked workers otherwise all
+                          # inherit the identical parent RNG state, so the first
+                          # frame each one draws would share the same dither noise
+
+
+def _worker_render(i):
+    return _draw_frame(i, _worker_ctx)
+
+
+def _render_pool(workers, ctx):
+    """Linux/macOS only (relies on fork() to hand every worker the context
+    via copy-on-write instead of re-pickling cam/lons/lats/the basemap
+    pyramid per task). Callers should check _can_fork() first and fall back
+    to a plain generator over _draw_frame otherwise."""
+    ctx_ = mp.get_context("fork")
+    return ctx_.Pool(processes=workers, initializer=_worker_init, initargs=(ctx,))
+
+
+def _can_fork():
+    return "fork" in mp.get_all_start_methods()
+
+
+def _worker_count(cover_only):
+    if cover_only:
+        return 1  # a single frame, no video pipe -- not worth pool startup cost
+    n = C.RENDER_WORKERS if C.RENDER_WORKERS is not None else os.cpu_count() or 1
+    return max(1, min(n, os.cpu_count() or n))
+
+
+def _chunk_size(n_frames, workers):
+    # A few frames per round-trip amortizes IPC without making cancellation
+    # or progress-bar updates too coarse (see render()'s cancel check).
+    return max(1, n_frames // (workers * 8))
+
+
+def _draw_frame(i, ctx):
+    """Pure function of a frame index + the precomputed context -- draws one
+    frame and returns (frame_bytes, cover_bytes_or_None). No shared mutable
+    state (besides gfx's own per-process memoization caches), so this is
+    safe to call from a worker process untouched by the rest of render()."""
+    cam, vp = ctx.cam, ctx.vp
+    lons, lats, cum_dist, stop_vert = ctx.lons, ctx.lats, ctx.cum_dist, ctx.stop_vert
+    vert_idx, stop_no = ctx.vert_idx, ctx.stop_no
+    accent_frames, accent_stops, ring_len = ctx.accent_frames, ctx.accent_stops, ctx.ring_len
+    n_frames, fade_start, reveal_start = ctx.n_frames, ctx.fade_start, ctx.reveal_start
+    vignette = ctx.vignette
+    city_lon, city_lat, city_name, log_pop = ctx.city_lon, ctx.city_lat, ctx.city_name, ctx.log_pop
+    zoom_span = ctx.zoom_span
+    log_pop_tight, log_pop_wide = ctx.log_pop_tight, ctx.log_pop_wide
+    size_lo, size_hi = ctx.size_lo, ctx.size_hi
+    CX, TW = ctx.CX, ctx.TW
+    total_km, n_stops, conv, unit, total_hours = \
+        ctx.total_km, ctx.n_stops, ctx.conv, ctx.unit, ctx.total_hours
+
+    clon, clat, hw = cam["lon"][i], cam["lat"][i], cam["hw"][i]
+    phase, pt, arc = cam["phase"][i], cam["ptime"][i], cam["arc"][i]
+    box = vp.bounds(clon, clat, hw)
+    canvas = vp.crop(box).astype(np.float32)
+
+    lf = 0.0
+    if C.LOOP_SEAMLESS and i >= fade_start:
+        # HUD-only crossfade now (see the loop-seamless note in render()) --
+        # denominator +1 keeps lf just under 1.0 on the final frame, so it
+        # doesn't sit as a duplicate-looking still right before the wrap
+        lf = gfx.ease_in_out((i - fade_start + 1) / (n_frames - fade_start + 1))
+
+    # zoom-independent scale factor for anything that should stay readable
+    zf = float(np.clip(C.ZOOM_MAX_DEG / hw, 0.35, 1.6))
+
+    sx, sy = vp.project(lons, lats, box)
+    # stop-only screen coords, used for dots/rings which should land on
+    # stores, not on the dense road-vertex geometry
+    psx, psy = sx[stop_vert], sy[stop_vert]
+    on_stops = (psx > -80) & (psx < C.OUT_W + 80) & (psy > -80) & (psy < C.OUT_H + 80)
+
+    v = int(vert_idx[i])   # road-vertex segment the head is currently on
+    k = int(stop_no[i])    # most recently visited store
+
+    # ---- hook/whip breathing state, needed below to fade the drive-only
+    # dim/pending layers in across hook->whip (see the loop-seam note)
+    if phase == "hook":
+        hook_a = 1.0
+        breath = np.sin(2 * np.pi * C.HOOK_PULSE_CYCLES * pt)
+    elif phase == "whip":
+        hook_a = 1.0 - gfx.clamp01(pt / 0.40)
+        breath = 0.0
+    else:
+        hook_a, breath = 0.0, 0.0
+
+    # ---- pending stops (dim), visited stops (lit)
+    # dim preview of the whole loop so the shape reads before it fills in.
+    # Faded by (1-hook_a) through hook/whip: frame 0 has k=0 (all but one
+    # stop pending) while the reveal's last frame has none pending, so
+    # without this fade the dot field would jump red at the loop wrap --
+    # this ramp and the hook overlay's own fade converge on the same
+    # (fully-drawn, nothing-pending-looking) state from both sides.
+    gfx.flat_polyline(canvas, np.c_[sx, sy], C.DOT_PENDING,
+                      width=max(1.0, S(3) * zf) * (1 - hook_a), alpha=0.85)
+
+    pending = on_stops.copy()
+    pending[:k + 1] = False
+    if pending.any():
+        gfx.flat_dots(canvas, np.c_[psx[pending], psy[pending]],
+                      C.DOT_PENDING, radius=max(1.0, S(5) * zf),
+                      alpha=0.9 * (1 - hook_a))
+
+    # loop-seamless dissolve (lf, see fade_start above): the reveal's own
+    # `pending` set is empty by now (k=n_stops), but frame 0 has every
+    # store but the first still pending -- draw that set in as lf -> 1 so
+    # the dot field is already in frame 0's state by the time it wraps,
+    # instead of the whole field jumping red on the cut
+    if lf > 0.003:
+        pending_seam = on_stops.copy()
+        pending_seam[:1] = False
+        if pending_seam.any():
+            gfx.flat_dots(canvas, np.c_[psx[pending_seam], psy[pending_seam]],
+                          C.DOT_PENDING, radius=max(1.0, S(5) * zf), alpha=0.9 * lf)
+
+    # ---- travelled route (arc/v/k are all 0 through hook+whip, so this
+    # draws almost nothing there -- just a still flare at the start pin,
+    # which is exactly the state the hook/whip overlay below fades into)
+    seg = min(v + 1, len(sx) - 1)
+    frac = 0.0
+    if cum_dist[seg] > cum_dist[v]:
+        frac = (arc - cum_dist[v]) / (cum_dist[seg] - cum_dist[v])
+    hx = sx[v] + frac * (sx[seg] - sx[v])
+    hy = sy[v] + frac * (sy[seg] - sy[v])
+
+    path = np.c_[np.append(sx[:v + 1], hx), np.append(sy[:v + 1], hy)]
+    gfx.neon_polyline(
+        canvas, path, C.NEON_CORE, C.NEON_MID, C.NEON_OUTER,
+        core_w=max(1.0, S(5) * zf), mid_w=max(1.0, S(10) * zf), intensity=0.85,
+    )
+    # hot tail is arc-length based (not vertex-count based), since a
+    # road leg can be anywhere from a few vertices to a few hundred.
+    # Tapered in 4 arc-length chunks instead of one hard-edged block: a
+    # uniform intensity=0.6 on top of the base 0.85 clips to solid white
+    # with a visible boundary scrolling along the route, whereas this
+    # ramps 0 -> peak so the tail reads as a comet, not a step. Also
+    # faded by (1-lf) across the loop-seamless dissolve, since the last
+    # reveal frame has 35km of tail lit and frame 0 has none.
+    tail_peak = 0.55 * (1 - lf)
+    if tail_peak > 0.003:
+        arc0 = arc - C.TAIL_KM
+        n_chunks = 4
+        for ci in range(n_chunks):
+            a0 = arc0 + (arc - arc0) * ci / n_chunks
+            a1 = arc0 + (arc - arc0) * (ci + 1) / n_chunks
+            i0 = int(np.clip(np.searchsorted(cum_dist, a0), 0, len(path) - 1))
+            i1 = int(np.clip(np.searchsorted(cum_dist, a1), i0, len(path) - 1))
+            if i1 <= i0:
+                continue
+            gfx.neon_polyline(
+                canvas, path[i0:i1 + 1], C.NEON_CORE, C.NEON_CORE, C.NEON_MID,
+                core_w=max(1.0, S(6) * zf), mid_w=max(1.0, S(13) * zf),
+                intensity=tail_peak * (ci + 1) / n_chunks,
+            )
+
+    vis = on_stops.copy()
+    vis[k + 1:] = False
+    if vis.any():
+        gfx.neon_dots(canvas, np.c_[psx[vis], psy[vis]], C.DOT_VISITED,
+                      radius=max(1.0, S(7) * zf), glow_sigma=S(16) * zf,
+                      intensity=0.9)
+
+    # every stop hit gets its own ring for its own lifetime, independent
+    # of and overlapping with any other still-live ring -- not just the
+    # newest, and never rate-limited, so nothing is cut off or skipped
+    lo = np.searchsorted(accent_frames, i - ring_len, side="left")
+    hi = np.searchsorted(accent_frames, i, side="right")
+    for e, es in zip(accent_frames[lo:hi], accent_stops[lo:hi]):
+        age = (i - e) / ring_len
+        if age < 1.0:
+            es = int(es)
+            gfx.ring(canvas, psx[es], psy[es], S(28) * zf + S(150) * zf * age,
+                     C.NEON_MID, width=S(4) * zf, alpha=0.85 * (1 - age) ** 2)
+    # plain, constant head marker -- the pulse lives entirely in the
+    # rings above, not in the flare's own size/brightness
+    gfx.head_flare(canvas, hx, hy, C.HEAD_COLOR,
+                   size=max(24, int(S(118) * zf)), intensity=0.9)
+
+    # ---- hook/whip overlay: the loop is already fully drawn (it has to
+    # match the reveal's end state -- see the loop-seamless notes above),
+    # so the opening can't draw itself on. Instead the whole lit loop
+    # breathes -- brightens and dims together -- for the length of the
+    # hook, then the whole overlay fades out across the first 40% of the
+    # whip so DRIVE's normal per-frame state (nothing travelled yet, all
+    # pending) is what's left underneath.
+    #
+    # `breath` is a sine that starts AND ends at 0 across the hook (see
+    # HOOK_PULSE_CYCLES in config.py), so frame 0 and the hook's last
+    # frame both sit at the same resting brightness as the reveal's end
+    # state -- the breathing never pops the seam or the whip handoff.
+    # (hook_a/breath were computed above, before the pending-dot fades.)
+    if hook_a > 0.003:
+        core_m = 1.0 + C.HOOK_PULSE_GAIN * max(breath, 0.0) \
+                     + C.HOOK_PULSE_DIP * min(breath, 0.0)
+        glow_m = 1.0 + C.HOOK_PULSE_BLOOM * max(breath, 0.0)
+
+        gfx.neon_polyline(
+            canvas, np.c_[sx, sy], C.NEON_CORE, C.NEON_MID, C.NEON_OUTER,
+            core_w=max(1.0, S(5) * zf), mid_w=max(1.0, S(10) * zf),
+            intensity=0.85 * hook_a * core_m, glow_boost=glow_m,
+        )
+        if on_stops.any():
+            gfx.neon_dots(canvas, np.c_[psx[on_stops], psy[on_stops]], C.DOT_VISITED,
+                          radius=max(1.0, S(7) * zf),
+                          glow_sigma=S(16) * zf * (1 + 0.5 * max(breath, 0.0)),
+                          intensity=0.9 * hook_a * core_m)
+
+    # ---- city labels: the population threshold slides with zoom, so
+    # small towns fade in as the camera tightens and drop off the wide
+    # shots instead of the old hard 6/14 rank-based snap
+    if len(city_lon):
+        u = gfx.clamp01(np.log(hw / C.ZOOM_MIN_DEG) / zoom_span)
+        thresh = log_pop_tight + u * (log_pop_wide - log_pop_tight)
+        a_city = np.clip((log_pop - thresh) / C.CITY_LABEL_FADE_DECADES, 0, 1)
+        cand = np.flatnonzero(a_city > 0.02)   # already biggest-first
+
+        if len(cand):
+            cx, cy = vp.project(city_lon[cand], city_lat[cand], box)
+            # feathered on-screen mask: a hard boolean cutoff makes a label
+            # blink out the instant it crosses the frame edge or a safe-zone
+            # line; ramping alpha over a ~60px band removes that pop
+            feather = S(60)
+            ex = np.minimum(np.clip((cx - (-40)) / feather, 0, 1),
+                            np.clip(((C.OUT_W + 40) - cx) / feather, 0, 1))
+            ey = np.minimum(np.clip((cy - S(240)) / feather, 0, 1),
+                            np.clip(((C.OUT_H - S(C.SAFE_BOTTOM)) - cy) / feather, 0, 1))
+            edge_a = ex * ey
+            on = edge_a > 0.02
+
+            # pre-seed collision with the HUD's own text/panel footprint
+            # (+ the like/comment/share rail) so labels stop drawing
+            # under the headline/stat block instead of just each other
+            placed = _hud_rects(phase, CX, TW)
+
+            shown = 0
+            for m in np.flatnonzero(on):
+                j = cand[m]
+                t_sz = gfx.clamp01((log_pop[j] - size_lo) / (size_hi - size_lo))
+                size = S(C.CITY_LABEL_SIZE_MIN +
+                         t_sz * (C.CITY_LABEL_SIZE_MAX - C.CITY_LABEL_SIZE_MIN))
+                label = city_name[j].upper()
+                # measure() returns ink WIDTH only; caps-only labels are
+                # about `size` tall, close enough for collision boxes
+                w = gfx.measure(label, gfx.font(size), S(2))
+                bx, by = cx[m] + S(16), cy[m] - size / 2
+
+                # continuous overlap fraction instead of a binary
+                # accept/reject -- two boxes grazing in and out of
+                # contact as the camera pans faded rather than strobed
+                overlap = 0.0
+                for px, py, pw, ph in placed:
+                    ix = max(0.0, min(bx + w, px + pw) - max(bx, px))
+                    iy = max(0.0, min(by + size, py + ph) - max(by, py))
+                    if ix > 0 and iy > 0:
+                        overlap = max(overlap, (ix * iy) / max(w * size, 1e-6))
+                coll_a = gfx.clamp01(1 - overlap * 2.5)
+                if coll_a <= 0.03:
+                    continue               # a bigger city/the HUD owns this spot
+
+                # ramp the last few slots out instead of a hard MAX break,
+                # so the lowest-ranked visible label doesn't pop in/out as
+                # a bigger city scrolls through and claims its slot
+                slot_a = gfx.clamp01((C.CITY_LABEL_MAX - shown) / 3.0)
+                if slot_a <= 0.03:
+                    break
+
+                a = a_city[j] * edge_a[m] * coll_a * slot_a
+                if a <= 0.02:
+                    continue
+                shown += 1
+                placed.append((bx, by, w, size))
+                gfx.flat_dots(canvas, np.array([[cx[m], cy[m]]]), C.TEXT_DIM,
+                              max(2, int(S(4))), 0.55 * a)
+                gfx.draw_text(canvas, label, size, (cx[m] + S(16), cy[m]),
+                              C.TEXT_DIM, anchor="lm", alpha=0.6 * a,
+                              letter_spacing=S(2))
+
+    canvas *= vignette
+
+    # eases the whole drive HUD out over the last half-second before the
+    # reveal, instead of it vanishing on the same frame the camera's
+    # follow speed hits 0 at the drive/reveal seam (see _hud's drive_out)
+    drive_out = gfx.clamp01((reveal_start - i) / (0.5 * C.FPS))
+
+    _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit, total_hours,
+        fade=1.0 - lf, drive_out=drive_out)
+
+    # cover PNG is a single still, not a video frame heading into a lossy
+    # re-encode -- built from the clean (pre-dither) canvas so it doesn't
+    # carry the per-pixel noise the video dither intentionally adds. Encoded
+    # to bytes here (not written to disk) so a worker process never touches
+    # the filesystem -- render() writes it once it gets this frame back.
+    cover_bytes = None
+    if ctx.cover_path and i == ctx.cover_idx:
+        cover_u8 = np.clip(canvas, 0, 255).astype(np.uint8)
+        ok, buf = cv2.imencode(".png", cv2.cvtColor(cover_u8, cv2.COLOR_RGB2BGR))
+        if ok:
+            cover_bytes = buf.tobytes()
+
+    # ±0.5 LSB dither before the one-and-only quantization step: breaks up
+    # 8-bit banding in the vignette/glow before the encoder ever sees it,
+    # which matters more once TikTok's own re-encode compounds it further
+    canvas += np.random.uniform(-0.5, 0.5, canvas.shape).astype(np.float32)
+    out_u8 = np.clip(canvas, 0, 255).astype(np.uint8)
+    return out_u8.tobytes(), cover_bytes
+
+
 def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
           cam, basemap_img, meta, cities, out_path,
           cover_path=None, cover_only=False, cancel=None):
@@ -107,9 +435,16 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
     disabled every vertex is a stop, so stop_vert == arange(n) and the two
     index spaces collapse back to the old behaviour.
 
-    `cancel`, if given, is a threading.Event: checked once per frame, and on
-    cancellation the ffmpeg child is killed and the partial output file is
-    removed rather than left as a moov-less, unplayable .mp4."""
+    Frames are independent of each other, so they're drawn in a fork()'d
+    process pool (see RENDER_WORKERS in config.py) when there's more than
+    one to draw and cover_only isn't set; the single-process loop is still
+    used for cover_only and as the fallback when fork() isn't available
+    (see _can_fork()).
+
+    `cancel`, if given, is a threading.Event: checked once per consumed
+    frame, and on cancellation the ffmpeg child and any render worker pool
+    are killed and the partial output file is removed rather than left as a
+    moov-less, unplayable .mp4."""
     global _S
     _S = C.OUT_W / 1080.0
     gfx.set_scale(_S)
@@ -182,6 +517,19 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
     CX = C.OUT_W // 2
     TW = C.OUT_W - 2 * S(C.TEXT_MARGIN)
 
+    # Everything a frame needs and nothing it mutates -- see _draw_frame.
+    ctx = SimpleNamespace(
+        scale=_S, vp=vp, lons=lons, lats=lats, cum_dist=cum_dist, stop_vert=stop_vert,
+        cam=cam, vert_idx=vert_idx, stop_no=stop_no, ring_len=ring_len,
+        accent_frames=accent_frames, accent_stops=accent_stops,
+        n_frames=n_frames, fade_start=fade_start, reveal_start=reveal_start,
+        vignette=vignette, city_lon=city_lon, city_lat=city_lat, city_name=city_name,
+        log_pop=log_pop, zoom_span=zoom_span, log_pop_tight=log_pop_tight,
+        log_pop_wide=log_pop_wide, size_lo=size_lo, size_hi=size_hi, CX=CX, TW=TW,
+        cover_path=cover_path, cover_idx=cover_idx, total_km=total_km, n_stops=n_stops,
+        conv=conv, unit=unit, total_hours=total_hours,
+    )
+
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         "-f", "rawvideo", "-pix_fmt", "rgb24",
@@ -225,266 +573,53 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
     frames = [cover_idx] if cover_only else range(n_frames)
     t0 = time.time()
     bar = progress.bar(len(frames), unit=" frames")
-    # `try`/`for` deliberately indented 2 (not 4) so the ~250-line frame body
-    # below needed no re-indentation when cancellation support was added.
+
+    workers = _worker_count(cover_only)
+    use_pool = workers > 1 and _can_fork()
+    if workers > 1 and not use_pool:
+        progress.warn("fork() unavailable on this platform, rendering single-process")
+    pool = None
     try:
-      for n_done, i in enumerate(frames, 1):
-        if cancel is not None and cancel.is_set():
-            cancelled = True
-            break
-        clon, clat, hw = cam["lon"][i], cam["lat"][i], cam["hw"][i]
-        phase, pt, arc = cam["phase"][i], cam["ptime"][i], cam["arc"][i]
-        box = vp.bounds(clon, clat, hw)
-        canvas = vp.crop(box).astype(np.float32)
-
-        lf = 0.0
-        if C.LOOP_SEAMLESS and i >= fade_start:
-            # HUD-only crossfade now (see the loop-seamless note above) --
-            # denominator +1 keeps lf just under 1.0 on the final frame, so it
-            # doesn't sit as a duplicate-looking still right before the wrap
-            lf = gfx.ease_in_out((i - fade_start + 1) / (n_frames - fade_start + 1))
-
-        # zoom-independent scale factor for anything that should stay readable
-        zf = float(np.clip(C.ZOOM_MAX_DEG / hw, 0.35, 1.6))
-
-        sx, sy = vp.project(lons, lats, box)
-        # stop-only screen coords, used for dots/rings which should land on
-        # stores, not on the dense road-vertex geometry
-        psx, psy = sx[stop_vert], sy[stop_vert]
-        on_stops = (psx > -80) & (psx < C.OUT_W + 80) & (psy > -80) & (psy < C.OUT_H + 80)
-
-        v = int(vert_idx[i])   # road-vertex segment the head is currently on
-        k = int(stop_no[i])    # most recently visited store
-
-        # ---- hook/whip breathing state, needed below to fade the drive-only
-        # dim/pending layers in across hook->whip (see the loop-seam note)
-        if phase == "hook":
-            hook_a = 1.0
-            breath = np.sin(2 * np.pi * C.HOOK_PULSE_CYCLES * pt)
-        elif phase == "whip":
-            hook_a = 1.0 - gfx.clamp01(pt / 0.40)
-            breath = 0.0
+        if cover_only:
+            # single frame, no video pipe -- not worth pool startup cost
+            frame_iter = (_draw_frame(i, ctx) for i in frames)
+        elif use_pool:
+            # cv2 lazily starts its own internal thread pool (GaussianBlur,
+            # warpAffine, ...) the first time it's used -- fork()ing while
+            # that pool has live threads leaves each child with a reference
+            # to worker threads that don't actually exist there (fork only
+            # duplicates the calling thread), so the child's first cv2 call
+            # hangs forever waiting on them. Forcing this in the parent
+            # *before* the fork, not just in _worker_init after it, avoids
+            # ever forking with that thread pool active in the first place.
+            cv2.setNumThreads(1)
+            pool = _render_pool(workers, ctx)
+            frame_iter = pool.imap(_worker_render, frames, chunksize=_chunk_size(len(frames), workers))
         else:
-            hook_a, breath = 0.0, 0.0
+            frame_iter = (_draw_frame(i, ctx) for i in frames)
 
-        # ---- pending stops (dim), visited stops (lit)
-        # dim preview of the whole loop so the shape reads before it fills in.
-        # Faded by (1-hook_a) through hook/whip: frame 0 has k=0 (all but one
-        # stop pending) while the reveal's last frame has none pending, so
-        # without this fade the dot field would jump red at the loop wrap --
-        # this ramp and the hook overlay's own fade converge on the same
-        # (fully-drawn, nothing-pending-looking) state from both sides.
-        gfx.flat_polyline(canvas, np.c_[sx, sy], C.DOT_PENDING,
-                          width=max(1.0, S(3) * zf) * (1 - hook_a), alpha=0.85)
-
-        pending = on_stops.copy()
-        pending[:k + 1] = False
-        if pending.any():
-            gfx.flat_dots(canvas, np.c_[psx[pending], psy[pending]],
-                          C.DOT_PENDING, radius=max(1.0, S(5) * zf),
-                          alpha=0.9 * (1 - hook_a))
-
-        # loop-seamless dissolve (lf, see fade_start above): the reveal's own
-        # `pending` set is empty by now (k=n_stops), but frame 0 has every
-        # store but the first still pending -- draw that set in as lf -> 1 so
-        # the dot field is already in frame 0's state by the time it wraps,
-        # instead of the whole field jumping red on the cut
-        if lf > 0.003:
-            pending_seam = on_stops.copy()
-            pending_seam[:1] = False
-            if pending_seam.any():
-                gfx.flat_dots(canvas, np.c_[psx[pending_seam], psy[pending_seam]],
-                              C.DOT_PENDING, radius=max(1.0, S(5) * zf), alpha=0.9 * lf)
-
-        # ---- travelled route (arc/v/k are all 0 through hook+whip, so this
-        # draws almost nothing there -- just a still flare at the start pin,
-        # which is exactly the state the hook/whip overlay below fades into)
-        seg = min(v + 1, len(sx) - 1)
-        frac = 0.0
-        if cum_dist[seg] > cum_dist[v]:
-            frac = (arc - cum_dist[v]) / (cum_dist[seg] - cum_dist[v])
-        hx = sx[v] + frac * (sx[seg] - sx[v])
-        hy = sy[v] + frac * (sy[seg] - sy[v])
-
-        path = np.c_[np.append(sx[:v + 1], hx), np.append(sy[:v + 1], hy)]
-        gfx.neon_polyline(
-            canvas, path, C.NEON_CORE, C.NEON_MID, C.NEON_OUTER,
-            core_w=max(1.0, S(5) * zf), mid_w=max(1.0, S(10) * zf), intensity=0.85,
-        )
-        # hot tail is arc-length based (not vertex-count based), since a
-        # road leg can be anywhere from a few vertices to a few hundred.
-        # Tapered in 4 arc-length chunks instead of one hard-edged block: a
-        # uniform intensity=0.6 on top of the base 0.85 clips to solid white
-        # with a visible boundary scrolling along the route, whereas this
-        # ramps 0 -> peak so the tail reads as a comet, not a step. Also
-        # faded by (1-lf) across the loop-seamless dissolve, since the last
-        # reveal frame has 35km of tail lit and frame 0 has none.
-        tail_peak = 0.55 * (1 - lf)
-        if tail_peak > 0.003:
-            arc0 = arc - C.TAIL_KM
-            n_chunks = 4
-            for ci in range(n_chunks):
-                a0 = arc0 + (arc - arc0) * ci / n_chunks
-                a1 = arc0 + (arc - arc0) * (ci + 1) / n_chunks
-                i0 = int(np.clip(np.searchsorted(cum_dist, a0), 0, len(path) - 1))
-                i1 = int(np.clip(np.searchsorted(cum_dist, a1), i0, len(path) - 1))
-                if i1 <= i0:
-                    continue
-                gfx.neon_polyline(
-                    canvas, path[i0:i1 + 1], C.NEON_CORE, C.NEON_CORE, C.NEON_MID,
-                    core_w=max(1.0, S(6) * zf), mid_w=max(1.0, S(13) * zf),
-                    intensity=tail_peak * (ci + 1) / n_chunks,
-                )
-
-        vis = on_stops.copy()
-        vis[k + 1:] = False
-        if vis.any():
-            gfx.neon_dots(canvas, np.c_[psx[vis], psy[vis]], C.DOT_VISITED,
-                          radius=max(1.0, S(7) * zf), glow_sigma=S(16) * zf,
-                          intensity=0.9)
-
-        # every stop hit gets its own ring for its own lifetime, independent
-        # of and overlapping with any other still-live ring -- not just the
-        # newest, and never rate-limited, so nothing is cut off or skipped
-        lo = np.searchsorted(accent_frames, i - ring_len, side="left")
-        hi = np.searchsorted(accent_frames, i, side="right")
-        for e, es in zip(accent_frames[lo:hi], accent_stops[lo:hi]):
-            age = (i - e) / ring_len
-            if age < 1.0:
-                es = int(es)
-                gfx.ring(canvas, psx[es], psy[es], S(28) * zf + S(150) * zf * age,
-                         C.NEON_MID, width=S(4) * zf, alpha=0.85 * (1 - age) ** 2)
-        # plain, constant head marker -- the pulse lives entirely in the
-        # rings above, not in the flare's own size/brightness
-        gfx.head_flare(canvas, hx, hy, C.HEAD_COLOR,
-                       size=max(24, int(S(118) * zf)), intensity=0.9)
-
-        # ---- hook/whip overlay: the loop is already fully drawn (it has to
-        # match the reveal's end state -- see the loop-seamless notes above),
-        # so the opening can't draw itself on. Instead the whole lit loop
-        # breathes -- brightens and dims together -- for the length of the
-        # hook, then the whole overlay fades out across the first 40% of the
-        # whip so DRIVE's normal per-frame state (nothing travelled yet, all
-        # pending) is what's left underneath.
-        #
-        # `breath` is a sine that starts AND ends at 0 across the hook (see
-        # HOOK_PULSE_CYCLES in config.py), so frame 0 and the hook's last
-        # frame both sit at the same resting brightness as the reveal's end
-        # state -- the breathing never pops the seam or the whip handoff.
-        # (hook_a/breath were computed above, before the pending-dot fades.)
-        if hook_a > 0.003:
-            core_m = 1.0 + C.HOOK_PULSE_GAIN * max(breath, 0.0) \
-                         + C.HOOK_PULSE_DIP * min(breath, 0.0)
-            glow_m = 1.0 + C.HOOK_PULSE_BLOOM * max(breath, 0.0)
-
-            gfx.neon_polyline(
-                canvas, np.c_[sx, sy], C.NEON_CORE, C.NEON_MID, C.NEON_OUTER,
-                core_w=max(1.0, S(5) * zf), mid_w=max(1.0, S(10) * zf),
-                intensity=0.85 * hook_a * core_m, glow_boost=glow_m,
-            )
-            if on_stops.any():
-                gfx.neon_dots(canvas, np.c_[psx[on_stops], psy[on_stops]], C.DOT_VISITED,
-                              radius=max(1.0, S(7) * zf),
-                              glow_sigma=S(16) * zf * (1 + 0.5 * max(breath, 0.0)),
-                              intensity=0.9 * hook_a * core_m)
-
-        # ---- city labels: the population threshold slides with zoom, so
-        # small towns fade in as the camera tightens and drop off the wide
-        # shots instead of the old hard 6/14 rank-based snap
-        if len(city_lon):
-            u = gfx.clamp01(np.log(hw / C.ZOOM_MIN_DEG) / zoom_span)
-            thresh = log_pop_tight + u * (log_pop_wide - log_pop_tight)
-            a_city = np.clip((log_pop - thresh) / C.CITY_LABEL_FADE_DECADES, 0, 1)
-            cand = np.flatnonzero(a_city > 0.02)   # already biggest-first
-
-            if len(cand):
-                cx, cy = vp.project(city_lon[cand], city_lat[cand], box)
-                # feathered on-screen mask: a hard boolean cutoff makes a label
-                # blink out the instant it crosses the frame edge or a safe-zone
-                # line; ramping alpha over a ~60px band removes that pop
-                feather = S(60)
-                ex = np.minimum(np.clip((cx - (-40)) / feather, 0, 1),
-                                np.clip(((C.OUT_W + 40) - cx) / feather, 0, 1))
-                ey = np.minimum(np.clip((cy - S(240)) / feather, 0, 1),
-                                np.clip(((C.OUT_H - S(C.SAFE_BOTTOM)) - cy) / feather, 0, 1))
-                edge_a = ex * ey
-                on = edge_a > 0.02
-
-                # pre-seed collision with the HUD's own text/panel footprint
-                # (+ the like/comment/share rail) so labels stop drawing
-                # under the headline/stat block instead of just each other
-                placed = _hud_rects(phase, CX, TW)
-
-                shown = 0
-                for m in np.flatnonzero(on):
-                    j = cand[m]
-                    t_sz = gfx.clamp01((log_pop[j] - size_lo) / (size_hi - size_lo))
-                    size = S(C.CITY_LABEL_SIZE_MIN +
-                             t_sz * (C.CITY_LABEL_SIZE_MAX - C.CITY_LABEL_SIZE_MIN))
-                    label = city_name[j].upper()
-                    # measure() returns ink WIDTH only; caps-only labels are
-                    # about `size` tall, close enough for collision boxes
-                    w = gfx.measure(label, gfx.font(size), S(2))
-                    bx, by = cx[m] + S(16), cy[m] - size / 2
-
-                    # continuous overlap fraction instead of a binary
-                    # accept/reject -- two boxes grazing in and out of
-                    # contact as the camera pans faded rather than strobed
-                    overlap = 0.0
-                    for px, py, pw, ph in placed:
-                        ix = max(0.0, min(bx + w, px + pw) - max(bx, px))
-                        iy = max(0.0, min(by + size, py + ph) - max(by, py))
-                        if ix > 0 and iy > 0:
-                            overlap = max(overlap, (ix * iy) / max(w * size, 1e-6))
-                    coll_a = gfx.clamp01(1 - overlap * 2.5)
-                    if coll_a <= 0.03:
-                        continue               # a bigger city/the HUD owns this spot
-
-                    # ramp the last few slots out instead of a hard MAX break,
-                    # so the lowest-ranked visible label doesn't pop in/out as
-                    # a bigger city scrolls through and claims its slot
-                    slot_a = gfx.clamp01((C.CITY_LABEL_MAX - shown) / 3.0)
-                    if slot_a <= 0.03:
-                        break
-
-                    a = a_city[j] * edge_a[m] * coll_a * slot_a
-                    if a <= 0.02:
-                        continue
-                    shown += 1
-                    placed.append((bx, by, w, size))
-                    gfx.flat_dots(canvas, np.array([[cx[m], cy[m]]]), C.TEXT_DIM,
-                                  max(2, int(S(4))), 0.55 * a)
-                    gfx.draw_text(canvas, label, size, (cx[m] + S(16), cy[m]),
-                                  C.TEXT_DIM, anchor="lm", alpha=0.6 * a,
-                                  letter_spacing=S(2))
-
-        canvas *= vignette
-
-        # eases the whole drive HUD out over the last half-second before the
-        # reveal, instead of it vanishing on the same frame the camera's
-        # follow speed hits 0 at the drive/reveal seam (see _hud's drive_out)
-        drive_out = gfx.clamp01((reveal_start - i) / (0.5 * C.FPS))
-
-        _hud(canvas, phase, pt, arc, k, n_stops, total_km, conv, unit, total_hours,
-            fade=1.0 - lf, drive_out=drive_out)
-
-        # cover PNG is a single still, not a video frame heading into a lossy
-        # re-encode -- write it from the clean (pre-dither) canvas so it
-        # doesn't carry the per-pixel noise the video dither intentionally adds
-        if cover_path and i == cover_idx:
-            cover_u8 = np.clip(canvas, 0, 255).astype(np.uint8)
-            cv2.imwrite(cover_path, cv2.cvtColor(cover_u8, cv2.COLOR_RGB2BGR))
-
-        # ±0.5 LSB dither before the one-and-only quantization step: breaks up
-        # 8-bit banding in the vignette/glow before the encoder ever sees it,
-        # which matters more once TikTok's own re-encode compounds it further
-        canvas += np.random.uniform(-0.5, 0.5, canvas.shape).astype(np.float32)
-        out_u8 = np.clip(canvas, 0, 255).astype(np.uint8)
-        if proc is not None:
-            proc.stdin.write(out_u8.tobytes())
-        bar.update(n_done)
-      normal_completion = True
+        for n_done, (frame_bytes, cover_bytes) in enumerate(frame_iter, 1):
+            if cancel is not None and cancel.is_set():
+                cancelled = True
+                break
+            if cover_bytes is not None:
+                with open(cover_path, "wb") as f:
+                    f.write(cover_bytes)
+            if proc is not None:
+                proc.stdin.write(frame_bytes)
+            bar.update(n_done)
+        normal_completion = True
     finally:
+        # terminate (not close+join) on cancellation or any exception mid-loop
+        # -- discards whatever's still queued/in-flight in the pool instead of
+        # waiting for it, mirroring the "kill, don't wait" treatment ffmpeg
+        # already gets below for the same reason.
+        if pool is not None:
+            if cancelled or not normal_completion:
+                pool.terminate()
+            else:
+                pool.close()
+            pool.join()
         # kill (not close+wait) on cancellation or any exception mid-loop --
         # otherwise an orphaned ffmpeg keeps running against a stdin that will
         # never see more data, and a killed process leaves no moov atom, so

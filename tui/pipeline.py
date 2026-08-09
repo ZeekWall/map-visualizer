@@ -75,6 +75,18 @@ def run(on_event, target=None, region=None, preview=False, cover_only=False,
     """
     if target or region:
         C.retarget(target, region)
+
+    # OUT_W/OUT_H/FPS/CRF/PRESET/DURATION_SEC are config.py module globals,
+    # not per-call parameters -- config stays imported for the TUI's whole
+    # process lifetime, so mutating them for one run (preview's 540x960@15fps,
+    # a --res override) and never putting them back leaks into every later
+    # run too. Toggle Preview off after a preview render and the *next*
+    # "full" render would still use preview's FPS/resolution (and therefore
+    # its frame count, since camera.build's frame count is FPS * duration)
+    # because nothing ever restored them. Snapshot and restore exactly like
+    # progress_muted below does for sink/_TTY.
+    saved = {name: getattr(C, name) for name in
+            ("OUT_W", "OUT_H", "FPS", "CRF", "PRESET", "DURATION_SEC")}
     if duration is not None:
         C.DURATION_SEC = duration
     if res is not None:
@@ -91,3 +103,6 @@ def run(on_event, target=None, region=None, preview=False, cover_only=False,
                 rebuild_basemap=rebuild_basemap, cancel=cancel)
     except Exception as e:
         raise PipelineError(e) from e
+    finally:
+        for name, value in saved.items():
+            setattr(C, name, value)
