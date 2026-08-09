@@ -3,6 +3,7 @@ these own their own layout and (where it makes sense) their own event
 handling, updated by app.py pushing data in rather than reaching into them.
 """
 
+import importlib
 import os
 import time
 
@@ -12,6 +13,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (Button, Collapsible, DataTable, Input, Label,
                              ProgressBar, Select, Static, Switch)
 
+import config
 import knobs
 import targets
 import targets_edit
@@ -200,6 +202,12 @@ class KnobsPane(VerticalScroll):
             else:
                 value = raw_value
             knobs.write_value(name, value)
+            # write_value only touches config.py on disk -- every module
+            # (including tui/pipeline.py, which renders in-process) already
+            # holds a reference to the one `config` module object from its
+            # own `import config as C` at startup, so without this the
+            # edited value is invisible until the TUI restarts.
+            importlib.reload(config)
             self.status(f"saved {name} = {value!r}")
         except (ValueError, SyntaxError) as e:
             self.status(f"[red]rejected {name}: {e}[/]")

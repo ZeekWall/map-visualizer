@@ -23,6 +23,7 @@ class Target:
     atp_brands: frozenset = None       # allow-list of ATP `brand` values; None -> all
     include_instore: bool = False      # keep licensed/in-store locations (ATP only)?
     osm_clauses: tuple = None          # raw Overpass nwr[...] union; None -> single brand/type match
+    static_places: tuple = None        # (name, lat, lon) triples; bypasses ATP/Overpass entirely
 
 
 # Add a brand by adding an entry here -- nothing else needs touching. Find a
@@ -69,6 +70,46 @@ TARGETS = {
     'sonic': Target(
         name='Sonic', osm=('amenity', 'fast_food'),
         atp_spider='sonic_drivein_us'),
+    "flockcameras": Target(
+        name="Flock Camera", osm=("man_made", "surveillance"),
+        # DeFlock crowd-sources ALPR camera locations into OSM as
+        # man_made=surveillance + surveillance:type=ALPR -- covers all ALPR
+        # vendors, not just Flock Safety hardware, but that's the common
+        # name for the category. No ATP spider; Overpass only. Coverage is
+        # volunteer-mapped and likely incomplete -- probe the in-region
+        # count before committing to a full render.
+        osm_clauses=(
+            'nwr["man_made"="surveillance"]["surveillance:type"="ALPR"](area.region);',
+        )),
+    # No OSM tag for "megachurch" and no ATP spider -- static_places short-
+    # circuits places.py's ATP/Overpass dispatch entirely. One point per
+    # church (its flagship/primary campus), not every satellite site, for
+    # the handful of these that run multiple campuses. Sourced from
+    # Wikipedia's "List of megachurches in the United States" (Texas
+    # entries) and geocoded one-time via OSM Nominatim; each result was
+    # checked to actually land in its stated city before being hardcoded.
+    "megachurches": Target(
+        name="Megachurch", osm=("amenity", "place_of_worship"),
+        static_places=(
+            ("Abundant Church", 31.7160803, -106.3112121),
+            ("Church Unlimited", 27.6616638, -97.3596366),
+            ("Community Bible Church", 29.6035602, -98.4411276),
+            ("Fellowship Church", 32.9638564, -97.0324356),
+            ("Gateway Church", 32.9497631, -97.1265729),
+            ("Green Acres Baptist Church", 32.3204603, -95.2837520),
+            ("Hope City Church", 29.8436950, -95.5632800),
+            ("Lakewood Church", 29.7303601, -95.4347180),
+            ("Lakepointe Church", 32.9797006, -96.2984705),
+            ("Milestone Church", 32.9586126, -97.2484964),
+            ("One Community Church", 33.1217516, -96.7367308),
+            ("Prestonwood Baptist Church", 33.0288229, -96.8463441),
+            ("Sagemont Church", 29.5978280, -95.2197785),
+            ("The Potter's House", 32.6557377, -96.8861598),
+            ("Friendship-West Baptist Church", 32.7048791, -96.8354434),
+            ("Inspiring Body of Christ Church", 32.6516051, -96.8893660),
+            ("Second Baptist Church", 29.7572394, -95.4989707),
+            ("Woodlands Church", 30.2013449, -95.4732195),
+        )),
 }
 
 # Hand-tuned overrides for states where the auto-derived bbox (see

@@ -27,6 +27,7 @@ from textual.widgets import Button, Footer, Header, Static, TabbedContent, TabPa
 
 import config as C
 import explore
+import osrm_ctl
 import progress
 import targets
 from tui.panes import CachePane, ExplorePane, KnobsPane, OutputPane, RunPane
@@ -116,6 +117,11 @@ class WorkbenchApp(App):
     def on_mount(self):
         self.query_one(OutputPane).refresh_table()
         self.query_one(CachePane).refresh_table()
+        self.run_worker(self._ensure_osrm, thread=True, group="osrm")
+
+    def _ensure_osrm(self):
+        status = osrm_ctl.ensure_running()
+        self.call_from_thread(self.notify, status, title="OSRM")
 
     # ---- Run tab wiring -------------------------------------------------
 

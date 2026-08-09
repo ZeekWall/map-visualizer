@@ -17,6 +17,12 @@ def _via_osm(refresh):
     return places, cached, "osm"
 
 
+def _via_static():
+    places = [{"@id": name, "@lat": lat, "@lon": lon, "name": name, "brand": name}
+             for name, lat, lon in C.STATIC_PLACES]
+    return places, True, "static"
+
+
 def _via_atp(refresh):
     places, cached = getPlacesATP(
         C.ATP_SPIDER, C.REGION_STATE, C.REGION_EXTENT,
@@ -27,7 +33,10 @@ def _via_atp(refresh):
 
 
 def get_places(refresh=False):
-    """Returns (places, cached, source) where source is "atp" or "osm"."""
+    """Returns (places, cached, source) where source is "static", "atp", or "osm"."""
+    if C.STATIC_PLACES:
+        return _via_static()
+
     source = C.PLACE_SOURCE
 
     if source == "osm":

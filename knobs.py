@@ -230,7 +230,11 @@ def write_value(name, new_value, path=CONFIG_PATH):
             f.writelines(new_lines)
 
         result = subprocess.run(
-            [sys.executable, "-c", "import config"],
+            # -B: don't write a __pycache__/config....pyc here -- its
+            # mtime-truncated-to-seconds staleness check can otherwise
+            # collide with a same-second, same-size edit and cause a
+            # caller's later importlib.reload(config) to serve stale bytecode.
+            [sys.executable, "-B", "-c", "import config"],
             cwd=os.path.dirname(os.path.abspath(path)) or ".",
             capture_output=True, text=True, timeout=30,
         )

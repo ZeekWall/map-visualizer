@@ -25,7 +25,7 @@ REGION_PAD_DEG = 0.3           # padding added to the auto-derived region bbox
 def retarget(target=None, region=None):
     global TARGET, REGION, PLACE_NAME, PLACE_MAIN_TYPE, PLACE_TYPE, \
         PLACE_QUERY_CLAUSES, ATP_SPIDER, ATP_BRANDS, ATP_INCLUDE_INSTORE, \
-        REGION_NAME, REGION_STATE, REGION_EXTENT, HOOK_LINES
+        STATIC_PLACES, REGION_NAME, REGION_STATE, REGION_EXTENT, HOOK_LINES
 
     TARGET = target or TARGET
     REGION = region or REGION
@@ -37,6 +37,7 @@ def retarget(target=None, region=None):
     ATP_SPIDER = t.atp_spider
     ATP_BRANDS = t.atp_brands
     ATP_INCLUDE_INSTORE = t.include_instore
+    STATIC_PLACES = t.static_places
 
     REGION_NAME, REGION_STATE, REGION_EXTENT = targets.resolve_region(REGION, REGION_PAD_DEG)
 
@@ -108,7 +109,7 @@ HOOK_SUB = "one perfect loop"
 REVEAL_LINE = "THE FULL LOOP"
 USE_MILES = True
 AVG_SPEED_MPH = 62             # for the "hours of driving" payoff stat
-GAS_COST_PER_MILE = 0.18       # blended "typical car" estimate; edit to taste
+GAS_COST_PER_MILE = 0.15       # blended "typical car" estimate; edit to taste
 
 # ---------------------------------------------------------------- solver
 SOLVER_TIME_BUDGET = 45        # seconds for 2-opt / Or-opt improvement
