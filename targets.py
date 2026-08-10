@@ -125,6 +125,9 @@ TARGETS = {
             'nwr["shop"="doityourself"]["brand"~"^(The )?Home Depot$",i]'
             '["name"!~"^Future ",i](area.region);',
         )),
+    'academy': Target(
+        name='Academy Sports + Outdoors', osm=('shop', 'sports'),
+        atp_spider='academy_us'),
 }
 
 # Hand-tuned overrides for states where the auto-derived bbox (see
