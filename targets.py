@@ -128,6 +128,28 @@ TARGETS = {
     'academy': Target(
         name='Academy Sports + Outdoors', osm=('shop', 'sports'),
         atp_spider='academy_us'),
+    'dutchbros': Target(
+        name='Dutch Bros', osm=('shop', 'coffee'),
+        atp_spider='dutch_bros',
+        atp_brands=frozenset({'Dutch Bros. Coffee'})),
+    'hteao': Target(
+        name='HTeaO', osm=('amenity', 'cafe'),
+        atp_spider='hteao_us',
+        atp_brands=frozenset({'HTeaO'})),
+    'torchys': Target(
+        name="Torchy's Tacos", osm=('amenity', 'fast_food'),
+        atp_spider='torchys_tacos_us',
+        atp_brands=frozenset({"Torchy's Tacos"})),
+    'fiveguys': Target(
+        name='Five Guys', osm=('amenity', 'fast_food'),
+        atp_spider='five_guys_us'),
+    'innout': Target(
+        name='In-N-Out', osm=('amenity', 'fast_food'),
+        atp_spider='innout'),
+    'dicks': Target(
+        name="Dick's Sporting Goods", osm=('shop', 'sports'),
+        atp_spider='dicks_sporting_goods',
+        atp_brands=frozenset({"Dick's Sporting Goods"})),
 }
 
 # Hand-tuned overrides for states where the auto-derived bbox (see
