@@ -150,6 +150,10 @@ TARGETS = {
         name="Dick's Sporting Goods", osm=('shop', 'sports'),
         atp_spider='dicks_sporting_goods',
         atp_brands=frozenset({"Dick's Sporting Goods"})),
+    'crumbl': Target(
+        name='Crumbl Cookies', osm=('shop', 'bakery'),
+        atp_spider='crumbl_cookies_us',
+        atp_brands=frozenset({'Crumbl Cookies'})),
 }
 
 # Hand-tuned overrides for states where the auto-derived bbox (see
