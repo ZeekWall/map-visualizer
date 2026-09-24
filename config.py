@@ -67,9 +67,18 @@ HOOK_SEC = 1.0                  # fixed seconds the hook holds before whip/drive
                                  # time-to-traversal regardless of video length
 
 # Fractions of the runtime remaining after HOOK_SEC. Must sum to 1.0.
+# (fractions, not fixed seconds -- these are ~3.0s reveal / ~54.9s drive /
+# ~2.1s whip at the default DURATION_SEC=61; they scale if you change that)
 ACT_WHIP = 0.035               # zoom to the start pin while the route un-draws to dim
-ACT_DRIVE = 0.795              # follow-cam along the route
-ACT_REVEAL = 0.14              # pull back out, full loop + final stats
+ACT_DRIVE = 0.915              # follow-cam along the route
+ACT_REVEAL = 0.05              # pull back out, full loop + final stats
+
+REVEAL_EASE_FRAC = 0.75         # fraction of ACT_REVEAL spent pulling the camera
+                                # back to the wide shot; the rest holds there so
+                                # the finished loop gets real screen time before
+                                # the seamless wrap back to the hook. Lower =
+                                # faster pullback, more hold time; 1.0 = ease the
+                                # whole reveal, no hold (old behavior).
 
 # breathing pulse during the hook -- off by default (a flat hold reads
 # cleaner and guarantees frame 0 matches the reveal's resting brightness for
@@ -87,16 +96,38 @@ HOOK_PULSE_DIP    = 0.22   # trough below rest (asymmetric: swells more than it 
 HOOK_PULSE_BLOOM  = 0.9    # extra glow-only swell at peak, on top of GAIN
 
 # ---------------------------------------------------------------- camera
-# Zoom is derived from how far the camera travels in LOOKAHEAD_SEC, so on-screen
-# speed stays roughly constant whether it's 45 Costcos or 1,300 McDonald's, and
-# whether the video is 15s or 60s. The MIN/MAX are only guard rails.
-LOOKAHEAD_SEC = .5            # seconds of road visible ahead; lower = tighter/faster
-ZOOM_MIN_DEG = 0.30
-ZOOM_MAX_DEG = 6
-ZOOM_RESPONSE = 1.0            # >1 exaggerates the tight/wide contrast
-CAMERA_SMOOTH_SEC = 0.75       # gaussian smoothing on the camera path
-WIDE_SHOT_LIFT = 0.20          # pushes the map up in wide shots to clear the stats block
-DISTANCE_WEIGHT = 0.65         # 1.0 = constant km/s, 0.0 = constant stops/s
+# Four knobs, each with one job. Zoom is purely a look -- it has no
+# correctness role, because containment (every point visible when the head
+# reaches it) is entirely position's job: the head is pinned inside a
+# centered box (CAMERA_BOX) and only pushes the camera when it reaches an
+# edge. The box is never violated -- it's a hard invariant, enforced by
+# solving for the smoothest camera path that stays inside the corridor the
+# box traces around the head, not by clamping. See camera.py's module
+# docstring for why (a plain clamp hitches).
+CAMERA_ZOOM_DEG = 0.95           # THE tightness dial: half-width in degrees at
+                                 # median drive speed. Smaller = tighter.
+CAMERA_ZOOM_ADAPT = 0.35        # 0..1 -- how much zoom widens on fast legs.
+                                 # 0 = constant zoom everywhere; 1 = half-width
+                                 # fully proportional to speed.
+CAMERA_SMOOTH_SEC = 0.75        # camera motion smoothness (position and zoom)
+CAMERA_BOX = 0.60               # head stays within this fraction of the frame,
+                                 # both axes
+WIDE_SHOT_LIFT = 0.20           # pushes the map up in wide shots to clear the stats block
+DISTANCE_WEIGHT = 0.9           # 1.0 = constant km/s, 0.0 = constant stops/s.
+                                 # The stops/s component gives every stop-to-stop
+                                 # leg roughly equal screen time regardless of
+                                 # physical distance, which is nice for lingering
+                                 # on dense clusters but forces a long, sparse leg
+                                 # into the same few frames as a short one -- the
+                                 # head has to cover much more ground per frame
+                                 # there, which is what drags/whips the camera.
+                                 # 0.9 keeps a little of that dense-cluster lingering
+                                 # while keeping the fastest legs within ~2.7x median
+                                 # speed (was ~7x at 0.65). Push toward 1.0 for a
+                                 # fully flat pace if any whip remains; CAMERA_ZOOM_ADAPT
+                                 # also cushions whatever speed variance is left, by
+                                 # widening the shot on faster legs.
+DEBUG_DRAW_DEADZONE = False     # draw the deadzone box + head marker, for tuning
 
 # ---------------------------------------------------------------- basemap
 BASEMAP_PX_WIDE = 6000         # per 1080p of OUT_W; scaled up at higher --res
@@ -104,11 +135,20 @@ BASEMAP_CACHE = "cache/basemap"
 DRAW_ROADS = True              # Natural Earth 10m roads (slow first render)
 CITY_MIN_POP = 10_000          # label pool floor; only affects what's cached
 
+# Reference half-widths the renderer measures the camera's actual zoom
+# against, deliberately separate from the CAMERA_* knobs above -- retuning
+# camera tightness must never change marker sizes or label density as a side
+# effect (it used to, when both read ZOOM_MIN_DEG/ZOOM_MAX_DEG directly).
+ELEMENT_SCALE_REF_DEG = 3.5     # half-width at which dots/rings/flare render
+                                 # at their nominal (authored) size
+CITY_LABEL_ZOOM_TIGHT = 0.30    # half-width treated as "tightest shot" when
+                                 # sliding the label threshold below
+
 # City labels fade in/out on a population threshold that slides with zoom.
 # Both ends are anchored in log space, since population and half-width each
 # span orders of magnitude.
 CITY_LABEL_POP_WIDE  = 1_200_000   # threshold at the widest (hook/reveal) shot
-CITY_LABEL_POP_TIGHT = 10_000      # threshold at ZOOM_MIN_DEG
+CITY_LABEL_POP_TIGHT = 10_000      # threshold at CITY_LABEL_ZOOM_TIGHT
 CITY_LABEL_FADE_DECADES = 0.25     # log10 band a label fades across
 CITY_LABEL_MAX = 14                # hard cap on labels drawn per frame
 CITY_LABEL_SIZE_MIN, CITY_LABEL_SIZE_MAX = 26, 38   # authored px, by population

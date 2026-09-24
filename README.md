@@ -144,10 +144,36 @@ tinted magenta and cyan, composited additively at half resolution, with a crisp
 core line and a hot flare at the leading edge. Compositing stays in float32 for
 the whole frame and clips once at the end.
 
-**Speed-adaptive camera.** Zoom is derived from how far the camera travels in
-`LOOKAHEAD_SEC`, so long highway legs pull out and metro clusters pull in, and
-on-screen speed stays constant whether it is 45 Costcos or 1,300 McDonald's, at
-15s or 60s. The path is Gaussian-smoothed in log-zoom space so nothing snaps.
+**Camera: four knobs, each with one job.** `CAMERA_ZOOM_DEG` is the tightness
+dial — half-width in degrees at median drive speed. `CAMERA_ZOOM_ADAPT` (0–1)
+controls how much that widens on fast legs (0 = constant zoom everywhere,
+1 = half-width fully proportional to speed); `CAMERA_SMOOTH_SEC` sets motion
+smoothness; `CAMERA_BOX` sets how much of the frame the head is allowed to
+roam before it pushes the camera. Zoom is percentile-normalised (dataset-size
+independent — 45 Costcos and 1,300 McDonald's behave the same) and smoothed
+in log-zoom space so nothing snaps.
+
+Deliberately, **zoom has no correctness role** — it's purely a look.
+Containment (every point visible when the head reaches it) is entirely
+position's job: the head is pinned inside a centered box and only pushes the
+camera when it reaches an edge, a hard invariant asserted on every drive
+frame, not best-effort. This is what replaced plain Gaussian smoothing of the
+head track, which let an isolated stop (e.g. one store hundreds of miles from
+the rest of the loop) get cut off-screen at the turnaround: the smoothing
+window straddled the outbound and return legs, which point in opposite
+directions and cancel, pulling the camera back toward the main cluster
+exactly when the head was furthest out. A plain positional clamp would fix
+containment but hitch at the box edge, so `camera.py` instead solves for the
+smoothest camera path confined to the corridor the box traces around the head
+track — unconstrained, that solve degenerates to plain Gaussian smoothing.
+Set `DEBUG_DRAW_DEADZONE = True` to draw the box for tuning.
+
+An earlier version tried to make zoom *also* help containment (widen on a
+spur before panning). That coupling was cut: on a dense, winding route
+"spur-like" excursion is nearly everywhere, not just at genuine outliers, so
+the heuristic ended up as the binding term on 80–90% of drive frames —
+silently overriding the tightness dial. Zoom and position are independent
+now; panning alone guarantees containment regardless of how tight zoom is set.
 
 **Fixed the cache bug.** `overpassapi.py` returned `places.csv` whenever the file
 existed, regardless of brand — so `PLACE_NAME = "McDonald's"` was silently

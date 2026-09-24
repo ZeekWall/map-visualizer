@@ -171,7 +171,7 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
     # the label population threshold slides log-linearly between the tightest
     # drive zoom and the wide establishing shot, so towns fade in as the
     # camera pushes in and drop off again on the wide shots
-    zoom_span = np.log(cam["wide_hw"] / C.ZOOM_MIN_DEG)
+    zoom_span = np.log(cam["wide_hw"] / C.CITY_LABEL_ZOOM_TIGHT)
     log_pop_tight = np.log10(C.CITY_LABEL_POP_TIGHT)
     log_pop_wide = np.log10(C.CITY_LABEL_POP_WIDE)
     # label size ramps across the same log-population range as the pool itself
@@ -245,7 +245,7 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
             lf = gfx.ease_in_out((i - fade_start + 1) / (n_frames - fade_start + 1))
 
         # zoom-independent scale factor for anything that should stay readable
-        zf = float(np.clip(C.ZOOM_MAX_DEG / hw, 0.35, 1.6))
+        zf = float(np.clip(C.ELEMENT_SCALE_REF_DEG / hw, 0.35, 1.6))
 
         sx, sy = vp.project(lons, lats, box)
         # stop-only screen coords, used for dots/rings which should land on
@@ -360,6 +360,15 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
         gfx.head_flare(canvas, hx, hy, C.HEAD_COLOR,
                        size=max(24, int(S(118) * zf)), intensity=0.9)
 
+        if C.DEBUG_DRAW_DEADZONE and phase == "drive":
+            # the deadzone box is symmetric around the head by construction
+            # (camera.py's corridor solve), so in screen space it's always a
+            # fixed centered rectangle -- no need to project it per frame
+            bw, bh = C.OUT_W * C.CAMERA_BOX, C.OUT_H * C.CAMERA_BOX
+            x0, y0 = int((C.OUT_W - bw) / 2), int((C.OUT_H - bh) / 2)
+            x1, y1 = int((C.OUT_W + bw) / 2), int((C.OUT_H + bh) / 2)
+            cv2.rectangle(canvas, (x0, y0), (x1, y1), (0, 255, 0), 2)
+
         # ---- hook/whip overlay: the loop is already fully drawn (it has to
         # match the reveal's end state -- see the loop-seamless notes above),
         # so the opening can't draw itself on. By default (HOOK_PULSE_ENABLED
@@ -397,7 +406,7 @@ def render(lons, lats, cum_dist, stop_vert, stop_dist, total_hours,
         # small towns fade in as the camera tightens and drop off the wide
         # shots instead of the old hard 6/14 rank-based snap
         if len(city_lon):
-            u = gfx.clamp01(np.log(hw / C.ZOOM_MIN_DEG) / zoom_span)
+            u = gfx.clamp01(np.log(hw / C.CITY_LABEL_ZOOM_TIGHT) / zoom_span)
             thresh = log_pop_tight + u * (log_pop_wide - log_pop_tight)
             a_city = np.clip((log_pop - thresh) / C.CITY_LABEL_FADE_DECADES, 0, 1)
             cand = np.flatnonzero(a_city > 0.02)   # already biggest-first
